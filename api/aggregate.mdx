@@ -72,7 +72,7 @@ async count(
 ): Promise<number>
 ```
 
-[Learn more →](/api/methods/count)
+[Learn more →](/api/count)
 
 ### countBatch
 
@@ -85,7 +85,7 @@ async countBatch(
 ): Promise<number[]>
 ```
 
-[Learn more →](/api/methods/count-batch)
+[Learn more →](/api/count#countbatch)
 
 ### sum
 
@@ -98,7 +98,7 @@ async sum(
 ): Promise<number>
 ```
 
-[Learn more →](/api/methods/sum)
+[Learn more →](/api/sum)
 
 ### sumBatch
 
@@ -111,7 +111,7 @@ async sumBatch(
 ): Promise<number[]>
 ```
 
-[Learn more →](/api/methods/sum-batch)
+[Learn more →](/api/sum#sumbatch)
 
 ### at
 
@@ -125,7 +125,7 @@ async at(
 ): Promise<Item<K, ID>>
 ```
 
-[Learn more →](/api/methods/at)
+[Learn more →](/api/at)
 
 ### atBatch
 
@@ -141,7 +141,7 @@ async atBatch(
 ): Promise<Item<K, ID>[]>
 ```
 
-[Learn more →](/api/methods/at-batch)
+[Learn more →](/api/at#atbatch)
 
 ### indexOf
 
@@ -158,7 +158,7 @@ async indexOf(
 ): Promise<number>
 ```
 
-[Learn more →](/api/methods/index-of)
+[Learn more →](/api/index-of)
 
 ### min
 
@@ -171,7 +171,7 @@ async min(
 ): Promise<Item<K, ID> | null>
 ```
 
-[Learn more →](/api/methods/min)
+[Learn more →](/api/min-max)
 
 ### max
 
@@ -184,7 +184,7 @@ async max(
 ): Promise<Item<K, ID> | null>
 ```
 
-[Learn more →](/api/methods/max)
+[Learn more →](/api/min-max#max)
 
 ### random
 
@@ -197,7 +197,7 @@ async random(
 ): Promise<Item<K, ID> | null>
 ```
 
-[Learn more →](/api/methods/random)
+[Learn more →](/api/min-max#random)
 
 ### paginate
 
@@ -218,7 +218,7 @@ async paginate(
 ): Promise<{ page: Item<K, ID>[]; cursor: string; isDone: boolean }>
 ```
 
-[Learn more →](/api/methods/paginate)
+[Learn more →](/api/paginate)
 
 ### iter
 
@@ -234,7 +234,7 @@ async *iter(
 ): AsyncGenerator<Item<K, ID>, void, undefined>
 ```
 
-[Learn more →](/api/methods/iter)
+[Learn more →](/api/paginate#iter)
 
 ## Maintenance Methods
 
@@ -252,7 +252,7 @@ async clear(
 ): Promise<void>
 ```
 
-[Learn more →](/api/methods/clear)
+[Learn more →](/api/clear)
 
 ### makeRootLazy
 
@@ -262,7 +262,7 @@ Reduces write contention by making the root node lazy.
 async makeRootLazy(ctx: RunMutationCtx, namespace: Namespace): Promise<void>
 ```
 
-[Learn more →](/api/methods/make-root-lazy)
+[Learn more →](/api/clear#makerootlazy)
 
 ### paginateNamespaces
 
@@ -310,4 +310,4 @@ async makeAllRootsLazy(ctx: RunMutationCtx & RunQueryCtx): Promise<void>
 
 - [DirectAggregate](/api/direct-aggregate) - For direct insertion and deletion of items
 - [TableAggregate](/api/table-aggregate) - For automatic synchronization with Convex tables
-- [Query Methods](/api/methods/overview) - Detailed documentation for all query methods
+- [count()](/api/count) / [sum()](/api/sum) / [at()](/api/at) - Query methods documentation

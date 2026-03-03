@@ -142,7 +142,7 @@ await aggregate.insert(ctx, {
 });
 ```
 
-[Learn more →](/operations/insert)
+[Learn more →](/api/insert)
 
 ### delete
 
@@ -185,7 +185,7 @@ await aggregate.delete(ctx, {
 });
 ```
 
-[Learn more →](/operations/delete)
+[Learn more →](/api/delete)
 
 ### replace
 
@@ -241,7 +241,7 @@ await aggregate.replace(
 );
 ```
 
-[Learn more →](/operations/replace)
+[Learn more →](/api/replace)
 
 ## Idempotent Write Methods
 
@@ -354,16 +354,16 @@ const topUsers = await aggregate.paginate(ctx, { pageSize: 10 });
 
 `DirectAggregate` inherits all query methods from [Aggregate](/api/aggregate):
 
-- [count](/api/methods/count) / [countBatch](/api/methods/count-batch)
-- [sum](/api/methods/sum) / [sumBatch](/api/methods/sum-batch)
-- [at](/api/methods/at) / [atBatch](/api/methods/at-batch)
-- [indexOf](/api/methods/index-of)
-- [min](/api/methods/min) / [max](/api/methods/max) / [random](/api/methods/random)
-- [paginate](/api/methods/paginate) / [iter](/api/methods/iter)
-- [clear](/api/methods/clear) / [makeRootLazy](/api/methods/make-root-lazy)
+- [count](/api/count) / [countBatch](/api/count#countbatch)
+- [sum](/api/sum) / [sumBatch](/api/sum#sumbatch)
+- [at](/api/at) / [atBatch](/api/at#atbatch)
+- [indexOf](/api/index-of)
+- [min](/api/min-max) / [max](/api/min-max#max) / [random](/api/min-max#random)
+- [paginate](/api/paginate) / [iter](/api/paginate#iter)
+- [clear](/api/clear) / [makeRootLazy](/api/clear#makerootlazy)
 
 ## Related
 
 - [Aggregate](/api/aggregate) - Base class with all query methods
 - [TableAggregate](/api/table-aggregate) - For automatic table synchronization
-- [Insert, Delete, Replace Operations](/operations/overview)
+- [Insert](/api/insert) / [Delete](/api/delete) / [Replace](/api/replace) - Write operation documentation
