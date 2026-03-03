@@ -1,0 +1,151 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "Convex Aggregate",
+  "projectDescription": "A Convex component for efficiently calculating counts, sums, and aggregations of document data with O(log n) performance.",
+  "theme": "aspen",
+  "primaryColor": "#F05454",
+  "lightColor": "#FF6B6B",
+  "darkColor": "#D94444",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/what-are-aggregates",
+              "concepts/keys-and-sorting",
+              "concepts/grouping",
+              "concepts/namespacing",
+              "concepts/reactivity-and-atomicity"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/table-aggregates",
+              "guides/direct-aggregates",
+              "guides/batch-operations",
+              "guides/keeping-data-in-sync",
+              "guides/migrations-and-backfills"
+            ]
+          },
+          {
+            "group": "Use Cases",
+            "pages": [
+              "use-cases/leaderboards",
+              "use-cases/offset-pagination",
+              "use-cases/random-access",
+              "use-cases/statistics"
+            ]
+          },
+          {
+            "group": "Performance",
+            "pages": [
+              "performance/read-dependencies",
+              "performance/lazy-aggregation",
+              "performance/optimizing-throughput"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/troubleshooting",
+              "operations/repairing-aggregates"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Classes",
+            "pages": [
+              "api/aggregate",
+              "api/direct-aggregate",
+              "api/table-aggregate"
+            ]
+          },
+          {
+            "group": "Query Methods",
+            "pages": [
+              "api/count",
+              "api/sum",
+              "api/at",
+              "api/index-of",
+              "api/min-max",
+              "api/paginate"
+            ]
+          },
+          {
+            "group": "Write Methods",
+            "pages": [
+              "api/insert",
+              "api/delete",
+              "api/replace",
+              "api/idempotent-operations"
+            ]
+          },
+          {
+            "group": "Maintenance",
+            "pages": [
+              "api/clear",
+              "api/triggers"
+            ]
+          },
+          {
+            "group": "Types",
+            "pages": [
+              "api/types"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "O(log n) performance for count, sum, and aggregation queries",
+    "Support for arbitrary Convex values as sort keys",
+    "Grouping data with prefix bounds and multi-part keys",
+    "Namespace isolation for high-throughput partitioned data",
+    "Fully reactive with automatic UI updates",
+    "Transactional consistency with atomic operations",
+    "Batch operations for improved performance",
+    "Integration with Convex tables via triggers"
+  ],
+  "publicApiSurface": [
+    "Aggregate.count()",
+    "Aggregate.sum()",
+    "Aggregate.at()",
+    "Aggregate.indexOf()",
+    "Aggregate.min()",
+    "Aggregate.max()",
+    "Aggregate.random()",
+    "Aggregate.paginate()",
+    "Aggregate.iter()",
+    "Aggregate.countBatch()",
+    "Aggregate.sumBatch()",
+    "Aggregate.atBatch()",
+    "DirectAggregate.insert()",
+    "DirectAggregate.delete()",
+    "DirectAggregate.replace()",
+    "DirectAggregate.insertIfDoesNotExist()",
+    "DirectAggregate.deleteIfExists()",
+    "DirectAggregate.replaceOrInsert()",
+    "TableAggregate.insert()",
+    "TableAggregate.delete()",
+    "TableAggregate.replace()",
+    "TableAggregate.trigger()",
+    "TableAggregate.idempotentTrigger()"
+  ]
+}
