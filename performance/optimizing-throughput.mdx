@@ -1,0 +1,370 @@
+---
+title: Optimizing Throughput
+description: Strategies and techniques for maximizing write and read performance in the Aggregate component
+---
+
+## Overview
+
+The Aggregate component provides several strategies for optimizing throughput. This guide covers techniques for both read and write optimization.
+
+## Write Optimization Strategies
+
+### 1. Use Bounds to Reduce Read Dependencies
+
+To reduce the read dependency footprint of your queries, partition your aggregate space and use bounds whenever possible.
+
+<Tip>
+  Bounds limit the portion of the aggregate tree that queries depend on, reducing spurious reruns and OCC conflicts.
+</Tip>
+
+#### Example: Range-Based Bounds
+
+```ts
+// Only reads scores between 95 and 100
+// In a query: only reruns when a score in that range changes
+// In a mutation: only conflicts with mutations modifying scores in that range
+await aggregateByScore.count(ctx, {
+  bounds: {
+    lower: { key: 95, inclusive: false },
+    upper: { key: 100, inclusive: true },
+  },
+});
+```
+
+#### Example: Prefix-Based Bounds
+
+```ts
+// Only reads data from a specific user
+// Will only rerun or conflict when a mutation modifies that user's data
+await aggregateScoreByUser.count(ctx, { 
+  bounds: { prefix: [username] } 
+});
+```
+
+**Benefits:**
+- Queries depend on a smaller subset of the tree
+- Reduced spurious query reruns
+- Lower OCC conflict rates in mutations
+- Multiple mutations can run concurrently if they operate on different ranges
+
+### 2. Choose Namespacing Over Bounds for High Throughput
+
+When you have natural data partitions and don't need cross-partition aggregation, use namespaces instead of bounds.
+
+```ts
+const scoresByGame = new TableAggregate<{
+  Namespace: Id<"games">;
+  Key: number;
+  DataModel: DataModel;
+  TableName: "scores";
+}>(components.scoresByGame, {
+  namespace: (doc) => doc.gameId,
+  sortKey: (doc) => doc.score,
+});
+
+// Each game has its own isolated tree
+const footballCount = await scoresByGame.count(ctx, { 
+  namespace: footballGameId 
+});
+```
+
+<Note>
+  Each namespace gets its own internal data structure with zero overlap between namespaces, providing complete isolation.
+</Note>
+
+**When to use namespaces:**
+- Data is naturally partitioned (e.g., per user, per tenant, per game)
+- You don't need to aggregate across partitions
+- You want maximum write throughput
+- You want zero contention between partitions
+
+**When to use bounds instead:**
+- You need to aggregate globally
+- Your partitions are temporary or dynamic
+- You want flexible querying across different ranges
+
+### 3. Avoid Sequential Keys
+
+Don't use strictly increasing values like `_creationTime` as your only sort key:
+
+```ts
+// ❌ Bad: All writes hit the same part of the tree
+const aggregate = new TableAggregate<{
+  Key: number;
+  DataModel: DataModel;
+  TableName: "events";
+}>(components.aggregate, {
+  sortKey: (doc) => doc._creationTime,
+});
+```
+
+**Why this is problematic:**
+- All new inserts target the end of the tree
+- Every write contends with every other write
+- No parallelism possible
+
+<Warning>
+  Using `_creationTime` as the sole sort key serializes all write operations, severely limiting throughput.
+</Warning>
+
+#### Solutions
+
+**Option 1: Add a randomizing component**
+
+```ts
+// ✅ Better: Add randomness to distribute writes
+const aggregate = new TableAggregate<{
+  Key: [number, string]; // [rounded timestamp, random ID]
+  DataModel: DataModel;
+  TableName: "events";
+}>(components.aggregate, {
+  sortKey: (doc) => [
+    Math.floor(doc._creationTime / 3600000), // Round to hour
+    doc._id,
+  ],
+});
+```
+
+**Option 2: Use namespacing with time ranges**
+
+```ts
+// ✅ Better: Namespace by time period
+const aggregate = new TableAggregate<{
+  Namespace: string; // "2024-01-15"
+  Key: number;
+  DataModel: DataModel;
+  TableName: "events";
+}>(components.aggregate, {
+  namespace: (doc) => {
+    const date = new Date(doc._creationTime);
+    return date.toISOString().split('T')[0];
+  },
+  sortKey: (doc) => doc._creationTime,
+});
+```
+
+### 4. Tune Lazy Aggregation Settings
+
+Adjust `maxNodeSize` and `rootLazy` for your workload:
+
+```ts
+// For write-heavy workloads
+await aggregate.clear(ctx, {
+  maxNodeSize: 64,  // Larger = less contention
+  rootLazy: true,   // Default: avoid root node contention
+});
+
+// For read-heavy workloads
+await aggregate.clear(ctx, {
+  maxNodeSize: 16,  // Default
+  rootLazy: false,  // Faster queries, more write contention
+});
+```
+
+See [Lazy Aggregation](/performance/lazy-aggregation) for detailed guidance.
+
+## Read Optimization Strategies
+
+### 1. Use Batch Operations
+
+For multiple similar queries, use batch operations to reduce overhead:
+
+```ts
+// ❌ Inefficient: Multiple separate calls
+const counts = await Promise.all([
+  aggregate.count(ctx, { bounds: bounds1 }),
+  aggregate.count(ctx, { bounds: bounds2 }),
+  aggregate.count(ctx, { bounds: bounds3 }),
+]);
+
+// ✅ Efficient: Single batch call
+const counts = await aggregate.countBatch(ctx, [
+  { bounds: bounds1 },
+  { bounds: bounds2 },
+  { bounds: bounds3 },
+]);
+```
+
+**Available batch operations:**
+- `countBatch()` - Count items for multiple bounds
+- `sumBatch()` - Sum items for multiple bounds
+- `atBatch()` - Get items at multiple offsets
+
+**Benefits:**
+- Reduced function call overhead
+- Optimized database access
+- Improved transaction efficiency
+- Lower latency for multiple queries
+
+<Tip>
+  Batch operations can be significantly faster than individual calls, especially when querying multiple ranges or offsets.
+</Tip>
+
+### 2. Minimize Aggregate Read Scope
+
+Only read what you need:
+
+```ts
+// ❌ Bad: Depends on entire aggregate
+const totalCount = await aggregate.count(ctx);
+
+// ✅ Better: Only depends on relevant subset
+const recentCount = await aggregate.count(ctx, {
+  bounds: {
+    lower: { key: Date.now() - 86400000 } // Last 24 hours
+  }
+});
+```
+
+### 3. Cache Expensive Aggregations
+
+For aggregations that don't need to be real-time, consider caching:
+
+```ts
+import { internalMutation, query } from "./_generated/server";
+
+// Cache the count in a document
+export const updateCachedCount = internalMutation({
+  handler: async (ctx) => {
+    const count = await aggregate.count(ctx);
+    await ctx.db.patch(cachedStatsId, { totalCount: count });
+  },
+});
+
+// Read from cache instead of aggregating
+export const getTotalCount = query({
+  handler: async (ctx) => {
+    const stats = await ctx.db.get(cachedStatsId);
+    return stats?.totalCount ?? 0;
+  },
+});
+```
+
+**Schedule periodic updates:**
+
+```ts
+import { cronJobs } from "convex/server";
+
+const crons = cronJobs();
+
+crons.interval(
+  "update cached counts",
+  { minutes: 5 },
+  internal.stats.updateCachedCount
+);
+
+export default crons;
+```
+
+<Note>
+  Caching is most useful for global aggregations that would otherwise depend on the entire tree.
+</Note>
+
+## Combined Strategy Example
+
+Here's a comprehensive example combining multiple optimization strategies:
+
+```ts
+import { components } from "./_generated/api";
+import { TableAggregate } from "@convex-dev/aggregate";
+
+// Optimized leaderboard design
+const leaderboard = new TableAggregate<{
+  Namespace: Id<"games">; // Isolate by game
+  Key: [number, string]; // [score, userId] for stable sorting
+  DataModel: DataModel;
+  TableName: "scores";
+}>(components.leaderboard, {
+  namespace: (doc) => doc.gameId,
+  sortKey: (doc) => [doc.score, doc.userId],
+  sumValue: (doc) => doc.score,
+});
+
+// Initialize with optimized settings
+export const initLeaderboard = internalMutation({
+  handler: async (ctx) => {
+    await leaderboard.clear(ctx, {
+      maxNodeSize: 32, // Reduce contention
+      rootLazy: true,  // Enable lazy root
+    });
+  },
+});
+
+// Efficient batch query for multiple users
+export const getUserRankings = query({
+  args: { gameId: v.id("games"), userIds: v.array(v.string()) },
+  handler: async (ctx, { gameId, userIds }) => {
+    // Use batch operation for multiple users
+    const rankings = await leaderboard.countBatch(
+      ctx,
+      userIds.map(userId => ({
+        namespace: gameId,
+        bounds: {
+          upper: { key: [Infinity, userId] },
+        },
+      }))
+    );
+    
+    return userIds.map((userId, i) => ({
+      userId,
+      rank: rankings[i],
+    }));
+  },
+});
+
+// User-specific query with minimal scope
+export const getUserStats = query({
+  args: { gameId: v.id("games"), userId: v.string() },
+  handler: async (ctx, { gameId, userId }) => {
+    // Only depends on this user's data in this game
+    const count = await leaderboard.count(ctx, {
+      namespace: gameId,
+      bounds: { prefix: [userId] },
+    });
+    
+    const sum = await leaderboard.sum(ctx, {
+      namespace: gameId,
+      bounds: { prefix: [userId] },
+    });
+    
+    return {
+      gamesPlayed: count,
+      totalScore: sum,
+      averageScore: count > 0 ? sum / count : 0,
+    };
+  },
+});
+```
+
+## Performance Checklist
+
+Use this checklist to optimize your aggregate performance:
+
+- [ ] Use namespaces for natural data partitions
+- [ ] Apply bounds to limit query scope
+- [ ] Avoid sequential-only sort keys
+- [ ] Use batch operations for multiple similar queries
+- [ ] Set appropriate `maxNodeSize` for your workload
+- [ ] Keep `rootLazy: true` unless read-heavy
+- [ ] Monitor OCC conflict rates
+- [ ] Profile query rerun frequency
+- [ ] Consider caching for expensive global aggregations
+- [ ] Test write throughput under concurrent load
+
+## Monitoring Performance
+
+Watch these metrics in the Convex dashboard:
+
+1. **OCC Error Rate**: High rate indicates write contention
+2. **Function Duration**: Slow aggregation queries may need optimization
+3. **Function Call Volume**: High query rerun rate suggests scope issues
+4. **Mutation Throughput**: Low throughput suggests contention problems
+
+<Warning>
+  If you see frequent OCC conflicts or slow mutation throughput, revisit your key design and aggregation settings.
+</Warning>
+
+## See Also
+
+- [Read Dependencies and OCC Conflicts](/performance/read-dependencies) - Understanding write interference
+- [Lazy Aggregation](/performance/lazy-aggregation) - Tuning lazy aggregation settings

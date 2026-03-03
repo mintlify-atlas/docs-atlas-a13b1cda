@@ -1,0 +1,355 @@
+---
+title: "Idempotent Operations"
+description: "Safe write methods for migrations and backfills"
+---
+
+Idempotent versions of the write methods that don't throw errors when items already exist or don't exist. These methods are essential for safely performing migrations and backfills.
+
+## When to Use Idempotent Operations
+
+Idempotent operations are particularly useful for:
+
+- **Live backfills** - Adding aggregates to existing data without disrupting live writes
+- **Migrations** - Safely migrating data when you're uncertain about the current state
+- **Retry logic** - Operations that might be retried after partial completion
+- **Parallel processing** - When multiple processes might try to write the same item
+
+<Note>
+For normal application writes with triggers, use the standard [`insert()`](/api/insert), [`delete()`](/api/delete), and [`replace()`](/api/replace) methods. They provide better error detection.
+</Note>
+
+## Live Backfill Pattern
+
+This is the recommended workflow for adding aggregates to existing data:
+
+1. Deploy code that uses idempotent methods (`insertIfDoesNotExist`, etc.) for live writes
+2. Run a background backfill, paginating over existing data
+3. Once complete, switch back to standard methods for better error detection
+4. Begin using the aggregate read methods in your application
+
+---
+
+## insertIfDoesNotExist()
+
+Inserts an item only if the `[key, id]` pair does not already exist. If it exists, this is a no-op.
+
+### DirectAggregate.insertIfDoesNotExist()
+
+#### Signature
+
+```typescript
+async insertIfDoesNotExist(
+  ctx: RunMutationCtx,
+  args: NamespacedArgs<
+    { key: K; id: ID; sumValue?: number },
+    Namespace
+  >
+): Promise<void>
+```
+
+#### Parameters
+
+<ParamField path="ctx" type="RunMutationCtx" required>
+  The mutation context from a Convex mutation or action.
+</ParamField>
+
+<ParamField path="args" type="object" required>
+  Same as [`insert()`](/api/insert#parameters) - includes key, id, optional sumValue, and optional namespace.
+</ParamField>
+
+#### Example
+
+```typescript
+import { DirectAggregate } from "@convex-dev/aggregate";
+import { internalMutation } from "./_generated/server";
+import { components } from "./_generated/api";
+
+const leaderboard = new DirectAggregate<{
+  Key: number;
+  Id: string;
+}>(components.aggregate);
+
+export const backfillScore = internalMutation({
+  args: { playerId: v.string(), score: v.number() },
+  handler: async (ctx, args) => {
+    // Safe to call even if already inserted
+    await leaderboard.insertIfDoesNotExist(ctx, {
+      key: -args.score,
+      id: args.playerId,
+      sumValue: args.score,
+    });
+  },
+});
+```
+
+### TableAggregate.insertIfDoesNotExist()
+
+#### Signature
+
+```typescript
+async insertIfDoesNotExist(
+  ctx: RunMutationCtx,
+  doc: DocumentByName<DataModel, TableName>
+): Promise<void>
+```
+
+#### Example
+
+```typescript
+import { TableAggregate } from "@convex-dev/aggregate";
+import { internalMutation } from "./_generated/server";
+import { components, internal } from "./_generated/api";
+import { Migrations } from "@convex-dev/migrations";
+
+const leaderboard = new TableAggregate<{
+  Key: number;
+  DataModel: DataModel;
+  TableName: "leaderboard";
+}>(components.aggregate, {
+  sortKey: (doc) => -doc.score,
+  sumValue: (doc) => doc.score,
+});
+
+const migrations = new Migrations<DataModel>(components.migrations);
+
+export const backfillAggregates = migrations.define({
+  table: "leaderboard",
+  migrateOne: async (ctx, doc) => {
+    await leaderboard.insertIfDoesNotExist(ctx, doc);
+  },
+});
+
+export const runBackfill = migrations.runner(
+  internal.leaderboard.backfillAggregates
+);
+```
+
+---
+
+## deleteIfExists()
+
+Deletes an item only if the `[key, id]` pair exists. If it doesn't exist, this is a no-op.
+
+### DirectAggregate.deleteIfExists()
+
+#### Signature
+
+```typescript
+async deleteIfExists(
+  ctx: RunMutationCtx,
+  args: NamespacedArgs<
+    { key: K; id: ID },
+    Namespace
+  >
+): Promise<void>
+```
+
+#### Parameters
+
+<ParamField path="ctx" type="RunMutationCtx" required>
+  The mutation context from a Convex mutation or action.
+</ParamField>
+
+<ParamField path="args" type="object" required>
+  Same as [`delete()`](/api/delete#parameters) - includes key, id, and optional namespace.
+</ParamField>
+
+#### Example
+
+```typescript
+import { DirectAggregate } from "@convex-dev/aggregate";
+import { mutation } from "./_generated/server";
+import { components } from "./_generated/api";
+
+const leaderboard = new DirectAggregate<{
+  Key: number;
+  Id: string;
+}>(components.aggregate);
+
+export const cleanupScore = mutation({
+  args: { playerId: v.string(), score: v.number() },
+  handler: async (ctx, args) => {
+    // Safe to call even if already deleted
+    await leaderboard.deleteIfExists(ctx, {
+      key: -args.score,
+      id: args.playerId,
+    });
+  },
+});
+```
+
+### TableAggregate.deleteIfExists()
+
+#### Signature
+
+```typescript
+async deleteIfExists(
+  ctx: RunMutationCtx,
+  doc: DocumentByName<DataModel, TableName>
+): Promise<void>
+```
+
+---
+
+## replaceOrInsert()
+
+Replaces an item if it exists, or inserts it if it doesn't. This is the idempotent version of [`replace()`](/api/replace).
+
+### DirectAggregate.replaceOrInsert()
+
+#### Signature
+
+```typescript
+async replaceOrInsert(
+  ctx: RunMutationCtx,
+  currentItem: NamespacedArgs<
+    { key: K; id: ID },
+    Namespace
+  >,
+  newItem: NamespacedArgs<
+    { key: K; sumValue?: number },
+    Namespace
+  >
+): Promise<void>
+```
+
+#### Parameters
+
+<ParamField path="ctx" type="RunMutationCtx" required>
+  The mutation context from a Convex mutation or action.
+</ParamField>
+
+<ParamField path="currentItem" type="object" required>
+  The current item to replace (if it exists).
+</ParamField>
+
+<ParamField path="newItem" type="object" required>
+  The new values for the item.
+</ParamField>
+
+#### Example
+
+```typescript
+import { DirectAggregate } from "@convex-dev/aggregate";
+import { mutation } from "./_generated/server";
+import { components } from "./_generated/api";
+
+const leaderboard = new DirectAggregate<{
+  Key: number;
+  Id: string;
+}>(components.aggregate);
+
+export const upsertScore = mutation({
+  args: {
+    playerId: v.string(),
+    oldScore: v.number(),
+    newScore: v.number(),
+  },
+  handler: async (ctx, args) => {
+    // Inserts if doesn't exist, replaces if it does
+    await leaderboard.replaceOrInsert(
+      ctx,
+      { key: -args.oldScore, id: args.playerId },
+      { key: -args.newScore, sumValue: args.newScore }
+    );
+  },
+});
+```
+
+### TableAggregate.replaceOrInsert()
+
+#### Signature
+
+```typescript
+async replaceOrInsert(
+  ctx: RunMutationCtx,
+  oldDoc: DocumentByName<DataModel, TableName>,
+  newDoc: DocumentByName<DataModel, TableName>
+): Promise<void>
+```
+
+---
+
+## Using Idempotent Triggers
+
+For live backfills, use `idempotentTrigger()` instead of `trigger()` during the backfill period:
+
+```typescript
+import { TableAggregate } from "@convex-dev/aggregate";
+import { Triggers } from "convex-helpers/server/triggers";
+
+const leaderboard = new TableAggregate<{
+  Key: number;
+  DataModel: DataModel;
+  TableName: "leaderboard";
+}>(components.aggregate, {
+  sortKey: (doc) => -doc.score,
+});
+
+const triggers = new Triggers<DataModel>();
+
+// During backfill - use idempotent trigger
+triggers.register("leaderboard", leaderboard.idempotentTrigger());
+
+// After backfill complete - switch to regular trigger
+// triggers.register("leaderboard", leaderboard.trigger());
+```
+
+<Warning>
+Remember to switch back to the regular `trigger()` after your backfill is complete. The standard trigger provides better error detection for production use.
+</Warning>
+
+## Complete Backfill Example
+
+Here's a complete example from the Convex Aggregate leaderboard example:
+
+```typescript filename="convex/leaderboard.ts"
+import { TableAggregate } from "@convex-dev/aggregate";
+import { Migrations } from "@convex-dev/migrations";
+import { components, internal } from "./_generated/api";
+import type { DataModel } from "./_generated/dataModel";
+
+const aggregateByScore = new TableAggregate<{
+  Key: number;
+  DataModel: DataModel;
+  TableName: "leaderboard";
+}>(components.aggregateByScore, {
+  sortKey: (doc) => -doc.score,
+});
+
+export const migrations = new Migrations<DataModel>(components.migrations);
+
+// Define the migration
+export const backfillAggregatesMigration = migrations.define({
+  table: "leaderboard",
+  migrateOne: async (ctx, doc) => {
+    await aggregateByScore.insertIfDoesNotExist(ctx, doc);
+    console.log("backfilled", doc.name, doc.score);
+  },
+});
+
+// Run from dashboard: npx convex run leaderboard:runAggregateBackfill
+export const runAggregateBackfill = migrations.runner(
+  internal.leaderboard.backfillAggregatesMigration
+);
+```
+
+## Related Methods
+
+<CardGroup cols={2}>
+  <Card title="insert()" icon="plus" href="/api/insert">
+    Standard insert that throws on duplicates
+  </Card>
+  
+  <Card title="delete()" icon="trash" href="/api/delete">
+    Standard delete that throws if item doesn't exist
+  </Card>
+  
+  <Card title="replace()" icon="arrow-right-arrow-left" href="/api/replace">
+    Standard replace that throws if item doesn't exist
+  </Card>
+  
+  <Card title="Migrations Guide" icon="database" href="/guides/migrations-and-backfills">
+    Complete guide to migrations and backfills
+  </Card>
+</CardGroup>

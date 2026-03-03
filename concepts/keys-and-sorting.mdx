@@ -1,0 +1,192 @@
+---
+title: "Keys and Sorting"
+description: "Learn how keys determine sort order and enable efficient range queries in aggregates"
+---
+
+## Understanding Keys
+
+The key is the most important concept in aggregates. Keys determine:
+
+1. **Sort order** - Items are stored and retrieved in key order
+2. **Range queries** - You can efficiently query items between two keys
+3. **Ranking** - Find the position of a key among all keys
+
+Keys can be any Convex value: numbers, strings, arrays, or even `null`.
+
+## Defining Sort Keys
+
+When creating a `TableAggregate`, you specify how to extract the sort key from each document:
+
+```ts
+const aggregate = new TableAggregate<{
+  Key: number;
+  DataModel: DataModel;
+  TableName: "leaderboard";
+}>(components.aggregate, {
+  sortKey: (doc) => doc.score,
+});
+```
+
+### Numeric Keys
+
+Numeric keys sort in ascending order by default:
+
+```ts
+sortKey: (doc) => doc.score  // Lower scores come first
+```
+
+For descending order (like a leaderboard), negate the value:
+
+```ts
+const aggregateByScore = new TableAggregate<{
+  Key: number;
+  DataModel: DataModel;
+  TableName: "leaderboard";
+}>(components.aggregateByScore, {
+  sortKey: (doc) => -doc.score,  // Higher scores come first
+});
+```
+
+<Note>
+With `sortKey: (doc) => -doc.score`, calling `aggregate.at(ctx, 0)` returns the highest score, and `aggregate.indexOf(ctx, myScore)` returns the rank (0-indexed).
+</Note>
+
+### String Keys
+
+String keys sort lexicographically:
+
+```ts
+sortKey: (doc) => doc.username  // Alphabetical order
+```
+
+This is useful for:
+- Alphabetized lists
+- Grouping by user ID
+- Time-based sorting using ISO timestamps
+
+### Array/Tuple Keys
+
+Array keys enable multi-level sorting and grouping:
+
+```ts
+const aggregateScoreByUser = new TableAggregate<{
+  Key: [string, number];
+  DataModel: DataModel;
+  TableName: "leaderboard";
+}>(components.aggregateScoreByUser, {
+  sortKey: (doc) => [doc.username, doc.score],
+});
+```
+
+Items are sorted by the first element, then by the second element for ties, and so on.
+
+<Info>
+Array keys are powerful for grouping. See the [Grouping](/concepts/grouping) page for more details on using prefix bounds with array keys.
+</Info>
+
+### Null Keys
+
+Use `null` keys when you don't need sorting:
+
+```ts
+const randomize = new TableAggregate<{
+  Key: null;
+  DataModel: DataModel;
+  TableName: "songs";
+}>(components.aggregate, { 
+  sortKey: (doc) => null 
+});
+```
+
+Without sorting, all documents are ordered by their `_id` which is generally random. This is useful for:
+- Total counts: `await aggregate.count(ctx)`
+- Random access: `await aggregate.at(ctx, Math.floor(Math.random() * count))`
+- Shuffling: Iterate through items in insertion order
+
+## Time-Based Keys
+
+Sort by creation time to enable time-range queries:
+
+```ts
+sortKey: (doc) => doc._creationTime
+```
+
+Then query by time ranges:
+
+```ts
+const now = Date.now();
+const oneMonthAgo = now - 30 * 24 * 60 * 60 * 1000;
+
+const recentCount = await aggregate.count(ctx, {
+  bounds: {
+    lower: { key: oneMonthAgo, inclusive: true },
+    upper: { key: now, inclusive: true },
+  },
+});
+```
+
+<Warning>
+Be careful with `_creationTime` keys: all new inserts go to the same part of the B-tree (the end), causing all inserts to contend with each other. Consider using namespaces or different key structures for high-write workloads.
+</Warning>
+
+## Range Queries with Bounds
+
+Bounds allow you to query items within a key range:
+
+```ts
+// Count scores between 50 and 100 (inclusive)
+await aggregate.count(ctx, {
+  bounds: {
+    lower: { key: 50, inclusive: true },
+    upper: { key: 100, inclusive: true },
+  },
+});
+
+// Count scores greater than 65 (exclusive)
+await aggregate.count(ctx, {
+  bounds: {
+    lower: { key: 65, inclusive: false },
+  },
+});
+
+// Count scores less than or equal to 100
+await aggregate.count(ctx, {
+  bounds: {
+    upper: { key: 100, inclusive: true },
+  },
+});
+```
+
+### Inclusive vs Exclusive Bounds
+
+- `inclusive: true` - Include items with keys equal to the bound
+- `inclusive: false` - Exclude items with keys equal to the bound
+
+## IDs as Tie-Breakers
+
+When multiple items have the same key, they're sorted by their ID. This ensures:
+
+1. **Stable ordering** - Items with the same key always appear in the same order
+2. **Precise lookups** - You can specify both key and ID for exact positioning
+
+```ts
+// Find the rank of a specific score by a specific user
+const rank = await aggregate.indexOf(ctx, score, { id: docId });
+```
+
+## Sort Order Considerations
+
+Pay attention to sort order when using aggregates:
+
+```ts
+// If sortKey is [game, username, score]:
+await aggregateByGame.max(ctx, { bounds: { prefix: [game] } })
+// Returns the user with the highest username (like "Zach"), NOT the highest score!
+
+// To get the highest score for a game, use [game, score]:
+sortKey: (doc) => [doc.game, doc.score]
+```
+
+<Tip>
+Always consider what your `max()`, `min()`, and `at()` queries will return based on your sort key structure.
+</Tip>

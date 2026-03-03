@@ -1,0 +1,150 @@
+---
+title: Installation
+description: Install and configure the Convex Aggregate component in your project
+---
+
+# Installation
+
+Get the Aggregate component set up in your Convex project in just a few steps.
+
+## Prerequisites
+
+You'll need an existing Convex project. If you don't have one yet:
+
+<Steps>
+  <Step title="Create a new Convex project">
+    Run one of these commands to set up Convex:
+    
+    <CodeGroup>
+    ```bash npm
+    npm create convex
+    ```
+    
+    ```bash yarn
+    yarn create convex
+    ```
+    
+    ```bash pnpm
+    pnpm create convex
+    ```
+    </CodeGroup>
+    
+    Or follow the [Convex quickstart guide](https://docs.convex.dev/home) to get started.
+  </Step>
+</Steps>
+
+## Install the Component
+
+<Steps>
+  <Step title="Install the npm package">
+    Add the `@convex-dev/aggregate` package to your project:
+    
+    <CodeGroup>
+    ```bash npm
+    npm install @convex-dev/aggregate
+    ```
+    
+    ```bash yarn
+    yarn add @convex-dev/aggregate
+    ```
+    
+    ```bash pnpm
+    pnpm add @convex-dev/aggregate
+    ```
+    </CodeGroup>
+  </Step>
+  
+  <Step title="Configure the component">
+    Create or update `convex/convex.config.ts` in your project and register the aggregate component:
+    
+    ```ts convex/convex.config.ts
+    import { defineApp } from "convex/server";
+    import aggregate from "@convex-dev/aggregate/convex.config";
+    
+    const app = defineApp();
+    app.use(aggregate);
+    
+    export default app;
+    ```
+    
+    <Note>
+    The `convex.config.ts` file should be in your `convex/` folder, not at the project root.
+    </Note>
+  </Step>
+  
+  <Step title="Deploy the component">
+    Run your Convex development server to deploy the component:
+    
+    <CodeGroup>
+    ```bash npm
+    npx convex dev
+    ```
+    
+    ```bash yarn
+    yarn convex dev
+    ```
+    
+    ```bash pnpm
+    pnpm convex dev
+    ```
+    </CodeGroup>
+    
+    The component will be installed and ready to use in your Convex functions.
+  </Step>
+</Steps>
+
+## Using Multiple Aggregates
+
+If you need to aggregate multiple tables or use different sorting strategies, register the component multiple times with unique names:
+
+```ts convex/convex.config.ts
+import { defineApp } from "convex/server";
+import aggregate from "@convex-dev/aggregate/convex.config";
+
+const app = defineApp();
+
+// One aggregate for sorting by score
+app.use(aggregate, { name: "aggregateByScore" });
+
+// Another aggregate for grouping by user
+app.use(aggregate, { name: "aggregateScoreByUser" });
+
+// Aggregate for photos
+app.use(aggregate, { name: "photos" });
+
+export default app;
+```
+
+You'll reference these named instances when creating `TableAggregate` objects:
+
+```ts
+import { components } from "./_generated/api";
+
+const aggregateByScore = new TableAggregate(components.aggregateByScore, {
+  sortKey: (doc) => doc.score,
+});
+
+const aggregateScoreByUser = new TableAggregate(components.aggregateScoreByUser, {
+  sortKey: (doc) => [doc.username, doc.score],
+});
+```
+
+<Warning>
+Each aggregate maintains its own internal data structure. Use multiple named aggregates when you need different sorting keys or when aggregating different tables.
+</Warning>
+
+## Verify Installation
+
+To verify the component is installed correctly, check your Convex dashboard at `https://dashboard.convex.dev`. You should see the aggregate component listed under your project's components.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build your first aggregate in minutes
+  </Card>
+  
+  <Card title="API Reference" icon="book" href="/api-reference">
+    Explore all available methods and options
+  </Card>
+</CardGroup>

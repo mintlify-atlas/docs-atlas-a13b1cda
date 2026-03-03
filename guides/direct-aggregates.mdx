@@ -1,0 +1,233 @@
+---
+title: Direct Aggregates
+description: Aggregate data that isn't stored in Convex tables using DirectAggregate
+---
+
+## Overview
+
+DirectAggregate allows you to aggregate data that isn't stored in a Convex table. You manually insert, delete, and replace items in the aggregate data structure. This is useful for:
+
+- Collecting statistics or metrics that don't need persistent storage
+- Aggregating ephemeral data
+- Building custom data structures with aggregation capabilities
+
+## Creating a DirectAggregate
+
+Define a DirectAggregate with type parameters for the key and ID:
+
+```ts
+import { DirectAggregate } from "@convex-dev/aggregate";
+import { components } from "./_generated/api";
+
+const stats = new DirectAggregate<{
+  Key: number;
+  Id: string;
+}>(components.stats);
+```
+
+### Type Parameters
+
+- **Key**: The type used to sort items (can be number, string, array, etc.)
+- **Id**: A unique string identifier for each item
+- **Namespace** (optional): Type for partitioning data into separate namespaces
+
+## Basic Operations
+
+### Insert
+
+Add a new item to the aggregate. The ID must be unique:
+
+```ts
+await stats.insert(ctx, {
+  key: 42,
+  id: "unique-id-123",
+  sumValue: 100, // optional
+});
+```
+
+If the `[key, id]` pair already exists, this will throw an error.
+
+### Delete
+
+Remove an item from the aggregate:
+
+```ts
+await stats.delete(ctx, {
+  key: 42,
+  id: "unique-id-123",
+});
+```
+
+Throws an error if the item doesn't exist.
+
+### Replace
+
+Update an existing item atomically:
+
+```ts
+await stats.replace(
+  ctx,
+  { key: oldKey, id: "unique-id-123" },
+  { key: newKey, sumValue: newValue }
+);
+```
+
+This is like delete + insert, but atomic - no query can observe the item missing.
+
+## Idempotent Operations
+
+For migrations and backfills, use idempotent versions that don't throw errors:
+
+### insertIfDoesNotExist
+
+```ts
+await stats.insertIfDoesNotExist(ctx, {
+  key: 42,
+  id: "unique-id-123",
+  sumValue: 100,
+});
+```
+
+Inserts only if the item doesn't already exist.
+
+### deleteIfExists
+
+```ts
+await stats.deleteIfExists(ctx, {
+  key: 42,
+  id: "unique-id-123",
+});
+```
+
+Deletes only if the item exists.
+
+### replaceOrInsert
+
+```ts
+await stats.replaceOrInsert(
+  ctx,
+  { key: oldKey, id: "unique-id-123" },
+  { key: newKey, sumValue: newValue }
+);
+```
+
+Replaces if exists, otherwise inserts.
+
+## Statistics Example
+
+Here's a complete example tracking latency statistics:
+
+```ts
+import { DirectAggregate } from "@convex-dev/aggregate";
+import { components } from "./_generated/api";
+import { mutation, query } from "./_generated/server";
+import { v } from "convex/values";
+
+const stats = new DirectAggregate<{
+  Key: number;
+  Id: string;
+}>(components.stats);
+
+export const reportLatency = mutation({
+  args: { latency: v.number() },
+  handler: async (ctx, { latency }) => {
+    await stats.insert(ctx, {
+      key: latency,
+      id: new Date().toISOString(),
+      sumValue: latency,
+    });
+  },
+});
+
+export const getStats = query({
+  handler: async (ctx) => {
+    const count = await stats.count(ctx);
+    if (count === 0) return null;
+
+    const mean = (await stats.sum(ctx)) / count;
+    const median = (await stats.at(ctx, Math.floor(count / 2))).key;
+    const p95 = (await stats.at(ctx, Math.floor(count * 0.95))).key;
+    const min = (await stats.min(ctx))!.key;
+    const max = (await stats.max(ctx))!.key;
+
+    return { count, mean, median, p95, min, max };
+  },
+});
+```
+
+## Using Namespaces
+
+Partition data into separate namespaces for independent aggregation:
+
+```ts
+const stats = new DirectAggregate<{
+  Key: number;
+  Id: string;
+  Namespace: string;
+}>(components.stats);
+
+// Insert with namespace
+await stats.insert(ctx, {
+  key: latency,
+  id: requestId,
+  sumValue: latency,
+  namespace: "api-server",
+});
+
+// Query specific namespace
+const apiCount = await stats.count(ctx, { namespace: "api-server" });
+```
+
+## Querying DirectAggregates
+
+DirectAggregate supports all the same query methods as TableAggregate:
+
+```ts
+// Count items
+const count = await stats.count(ctx);
+
+// Sum values
+const total = await stats.sum(ctx);
+
+// Get item at offset/rank
+const medianItem = await stats.at(ctx, Math.floor(count / 2));
+
+// Find index of a key
+const rank = await stats.indexOf(ctx, 42);
+
+// Get min/max
+const min = await stats.min(ctx);
+const max = await stats.max(ctx);
+
+// Paginate through items
+const { page, cursor, isDone } = await stats.paginate(ctx, {
+  pageSize: 100,
+  order: "asc",
+});
+
+// Iterate over all items
+for await (const item of stats.iter(ctx)) {
+  console.log(item.key, item.id, item.sumValue);
+}
+```
+
+## When to Use DirectAggregate
+
+Choose DirectAggregate over TableAggregate when:
+
+1. **No persistent storage needed**: You're collecting temporary metrics or statistics
+2. **Custom key generation**: Your keys don't correspond to document fields
+3. **Non-table data sources**: Aggregating data from external APIs or computed values
+4. **Full control**: You want explicit control over insert/delete/replace timing
+
+Choose TableAggregate when:
+
+1. You're aggregating data from a Convex table
+2. You want automatic updates via triggers
+3. Keys and sum values come directly from document fields
+
+## Next Steps
+
+- Improve performance with [Batch Operations](/guides/batch-operations)
+- Learn about [Keeping Data in Sync](/guides/keeping-data-in-sync)
+- Understand [Migrations and Backfills](/guides/migrations-and-backfills)

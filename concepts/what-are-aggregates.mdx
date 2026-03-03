@@ -1,0 +1,104 @@
+---
+title: "What are Aggregates?"
+description: "Understand what aggregates are and how they enable efficient data aggregation in Convex"
+---
+
+## Overview
+
+With plain Convex indexes, you can insert new documents and paginate through all documents. But sometimes you want big-picture data that encompasses many of your individual data points, without having to fetch them all. That's where aggregates come in.
+
+The Aggregates component keeps a data structure with denormalized counts and sums. It's effectively a **key-value store which is sorted by the key**, where you can count values and number of keys that lie between two keys.
+
+## O(log n) Performance
+
+The Aggregate component provides **O(log(n))-time lookups**, instead of the O(n) that would result from naive usage of `.collect()` in Convex or `COUNT(*)` in MySQL or Postgres.
+
+This performance advantage comes from an internal B-tree data structure that stores denormalized counts. Instead of reading every document to calculate aggregates, the component only needs to read a logarithmic number of internal nodes.
+
+<Info>
+For example, to count 1 million items, a naive approach requires reading all 1 million documents. With aggregates, you only need to read approximately 20 internal nodes.
+</Info>
+
+## Common Use Cases
+
+Suppose you have a leaderboard of game scores. The Aggregate component makes these operations efficient:
+
+### 1. Total Counts
+
+Count the total number of scores:
+
+```ts
+await aggregate.count(ctx)
+```
+
+### 2. Conditional Counts
+
+Count scores greater than 65:
+
+```ts
+await aggregate.count(ctx, {
+  bounds: { 
+    lower: { key: 65, inclusive: false } 
+  }
+})
+```
+
+### 3. Percentile Queries
+
+Find the p95 score:
+
+```ts
+const p95Index = Math.floor(await aggregate.count(ctx) * 0.95)
+const p95Score = await aggregate.at(ctx, p95Index)
+```
+
+### 4. Averages
+
+Find the overall average score:
+
+```ts
+const avg = await aggregate.sum(ctx) / await aggregate.count(ctx)
+```
+
+### 5. Rankings
+
+Find the ranking for a score of 65:
+
+```ts
+const rank = await aggregate.indexOf(ctx, 65)
+```
+
+## Key Types
+
+The keys in an aggregate can be any Convex value, allowing you to sort your data by:
+
+1. **A number** - like a leaderboard score
+2. **A string** - like user IDs to count data owned by each user
+3. **An [index key](https://stack.convex.dev/pagination#whats-an-index-key)** - arrays or tuples for multi-level sorting
+4. **null** - use `key=null` for everything if you just want a total count for random access
+
+<Tip>
+When you don't need ordering, set `sortKey: (doc) => null`. Without sorting, all documents are ordered by their `_id` which is generally random. This is useful for random access or shuffling.
+</Tip>
+
+## Additional Use Cases
+
+The Aggregate component can efficiently calculate:
+
+- In a messaging app, how many messages have been sent within the past month?
+- **Offset-based pagination**: view the 14th page of photos, where each page has 50 photos
+- **Random access**: Look up a random song in a playlist, as the next song to play
+- **Min/Max queries**: Find the highest or lowest value in a dataset
+- **Rank queries**: Determine where a specific value ranks among all values
+
+## Performance Characteristics
+
+All aggregate operations run in **O(log n)** time:
+
+- `count()` - O(log n)
+- `sum()` - O(log n)
+- `at()` - O(log n) for index-based lookup
+- `indexOf()` - O(log n) for rank queries
+- `min()` / `max()` - O(log n)
+
+This makes aggregates practical even for datasets with millions of entries.

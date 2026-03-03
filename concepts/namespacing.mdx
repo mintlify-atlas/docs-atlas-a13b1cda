@@ -1,0 +1,237 @@
+---
+title: "Namespacing"
+description: "Isolate data partitions for maximum throughput and independent aggregation"
+---
+
+## Overview
+
+If your data is separated into distinct partitions, and you don't need to aggregate between partitions, then you can put each partition into its own namespace. Each namespace gets its own internal B-tree data structure, completely isolated from other namespaces.
+
+## When to Use Namespaces
+
+Use namespaces when:
+
+1. **Data is naturally partitioned** - Different games, different tenants, different users
+2. **Cross-partition aggregation isn't needed** - You never need to sum/count across all partitions
+3. **High write throughput is required** - Namespaces eliminate contention between partitions
+4. **Partitions are independent** - Like chess scores vs football scores
+
+<Info>
+The scoring system for chess isn't related to the scoring system for football. So we can namespace our scores based on the game, keeping internal data structures separate and throughput high.
+</Info>
+
+## Defining a Namespaced Aggregate
+
+Specify a namespace function when creating the aggregate:
+
+```ts
+const leaderboardByGame = new TableAggregate<{
+  Namespace: Id<"games">;
+  Key: number;
+  DataModel: DataModel;
+  TableName: "scores";
+}>(components.leaderboardByGame, {
+  namespace: (doc) => doc.gameId,
+  sortKey: (doc) => doc.score,
+});
+```
+
+The namespace can be any Convex value: string, number, or ID.
+
+## Using Namespaced Aggregates
+
+Whenever you query a namespaced aggregate, you **must** specify the namespace:
+
+```ts
+const footballHighScore = await leaderboardByGame.max(ctx, {
+  namespace: footballId,
+});
+
+const chessScoreCount = await leaderboardByGame.count(ctx, {
+  namespace: chessId,
+});
+
+const tennisAverage = 
+  (await leaderboardByGame.sum(ctx, { namespace: tennisId })) /
+  (await leaderboardByGame.count(ctx, { namespace: tennisId }));
+```
+
+<Warning>
+You cannot aggregate across namespaces. If you need global totals, use grouping with prefix bounds instead.
+</Warning>
+
+## Namespaces vs Grouping
+
+Here's the same functionality implemented with both approaches:
+
+### Grouping Approach
+
+```ts
+// Aggregate with grouping
+const aggregateScoreByUser = new TableAggregate<{
+  Key: [string, number];  // [username, score]
+  DataModel: DataModel;
+  TableName: "leaderboard";
+}>(components.aggregateScoreByUser, {
+  sortKey: (doc) => [doc.username, doc.score],
+  sumValue: (doc) => doc.score,
+});
+
+// Per-user query
+const bounds = { prefix: [username] };
+const highScoreForUser = await aggregateScoreByUser.max(ctx, { bounds });
+const avgScoreForUser =
+  (await aggregateScoreByUser.sum(ctx, { bounds })) /
+  (await aggregateScoreByUser.count(ctx, { bounds }));
+
+// Global query (across all users)
+const globalAverageScore =
+  (await aggregateScoreByUser.sum(ctx)) /
+  (await aggregateScoreByUser.count(ctx));
+```
+
+### Namespace Approach
+
+```ts
+// Aggregate with namespaces
+const aggregateScoreByUser = new TableAggregate<{
+  Namespace: string;  // username
+  Key: number;        // score
+  DataModel: DataModel;
+  TableName: "leaderboard";
+}>(components.aggregateScoreByUser, {
+  namespace: (doc) => doc.username,
+  sortKey: (doc) => doc.score,
+  sumValue: (doc) => doc.score,
+});
+
+// Per-user query
+const forUser = { namespace: username };
+const highScoreForUser = await aggregateScoreByUser.max(ctx, forUser);
+const avgScoreForUser =
+  (await aggregateScoreByUser.sum(ctx, forUser)) /
+  (await aggregateScoreByUser.count(ctx, forUser));
+
+// Global query NOT POSSIBLE with namespaces!
+// You cannot aggregate across all users
+```
+
+## Throughput Benefits
+
+Namespaces increase throughput because a user's data won't interfere with other users:
+
+**Without Namespaces (Grouping):**
+- Users "Alice" and "Amy" have adjacent keys `["Alice", ...]` and `["Amy", ...]`
+- They share internal B-tree nodes
+- Writes by Alice can cause contention with writes by Amy
+- Queries for Alice may rerun when Amy's data changes
+
+**With Namespaces:**
+- Alice's namespace has a separate B-tree from Amy's namespace
+- No shared internal nodes
+- Writes by Alice never contend with writes by Amy
+- Queries for Alice never affected by Amy's data changes
+
+<Tip>
+For high-write workloads with independent partitions, namespaces can dramatically improve performance and reduce OCC conflicts.
+</Tip>
+
+## Example: Photo Albums
+
+Here's a real example from the Aggregate component:
+
+```ts
+defineSchema({
+  photos: defineTable({ 
+    album: v.string(), 
+    url: v.string() 
+  }).index("by_album_creation_time", ["album"]),
+});
+
+const photos = new TableAggregate<{
+  Namespace: string;  // album name
+  Key: number;        // creation time
+  DataModel: DataModel;
+  TableName: "photos";
+}>(components.photos, {
+  namespace: (doc) => doc.album,
+  sortKey: (doc) => doc._creationTime,
+});
+
+// Query photos in a specific album
+export const pageOfPhotos = query({
+  args: { offset: v.number(), numItems: v.number(), album: v.string() },
+  handler: async (ctx, { offset, numItems, album }) => {
+    const { key } = await photos.at(ctx, offset, { namespace: album });
+    return await ctx.db
+      .query("photos")
+      .withIndex("by_album_creation_time", (q) =>
+        q.eq("album", album).gte("_creationTime", key)
+      )
+      .take(numItems);
+  },
+});
+```
+
+Each album has its own B-tree, so uploads to different albums never contend with each other.
+
+## Iterating Over Namespaces
+
+You can iterate over all namespaces if needed:
+
+```ts
+for await (const namespace of aggregate.iterNamespaces(ctx)) {
+  const count = await aggregate.count(ctx, { namespace });
+  console.log(`Namespace ${namespace}: ${count} items`);
+}
+```
+
+This is useful for:
+- Clearing all namespaces
+- Running migrations
+- Computing cross-namespace analytics (but beware of performance at scale)
+
+## Choosing Between Grouping and Namespacing
+
+| Feature | Grouping (Prefix Bounds) | Namespacing |
+|---------|--------------------------|-------------|
+| **Cross-group aggregation** | ✅ Yes | ❌ No |
+| **Single query spanning groups** | ✅ Yes | ❌ No |
+| **Write isolation** | ❌ Nearby groups contend | ✅ Complete isolation |
+| **Throughput** | Lower for high-write | Higher for high-write |
+| **Query reactivity** | May rerun on unrelated changes | Only reruns for same namespace |
+| **Use case** | Flexible analysis | Independent partitions |
+
+## Combining Both Approaches
+
+You can use namespaces for the top-level partition and grouping within each namespace:
+
+```ts
+const aggregate = new TableAggregate<{
+  Namespace: Id<"games">;        // Game ID
+  Key: [string, number];         // [username, score]
+  DataModel: DataModel;
+  TableName: "scores";
+}>(components.aggregate, {
+  namespace: (doc) => doc.gameId,
+  sortKey: (doc) => [doc.username, doc.score],
+});
+
+// Per-user within a game
+const userScores = await aggregate.count(ctx, {
+  namespace: gameId,
+  bounds: { prefix: [username] },
+});
+
+// All scores in a game
+const gameScores = await aggregate.count(ctx, {
+  namespace: gameId,
+});
+
+// Cross-game aggregation NOT POSSIBLE
+```
+
+This gives you:
+- Isolation between games (maximum throughput)
+- Grouping within each game (flexible queries per game)
+- No cross-game contention

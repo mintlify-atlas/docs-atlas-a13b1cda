@@ -1,0 +1,160 @@
+---
+title: 'clear, makeRootLazy, clearAll'
+description: 'Initialize and maintain the aggregate data structure'
+---
+
+## clear()
+
+Re-initialize the data structure, removing all items if it exists.
+
+```typescript
+async clear(
+  ctx: RunMutationCtx,
+  options?: {
+    maxNodeSize?: number;
+    rootLazy?: boolean;
+    namespace?: Namespace;
+  }
+): Promise<void>
+```
+
+<ParamField path="ctx" type="RunMutationCtx" required>
+  Convex mutation context with `runMutation` method
+</ParamField>
+
+<ParamField path="options" type="object">
+  Configuration options for the data structure
+
+  <Expandable title="properties">
+    <ParamField path="maxNodeSize" type="number" default="16">
+      Controls the data structure's width and depth. Larger values can reduce write contention but increase read latency. This is how you tune the B-tree structure.
+    </ParamField>
+
+    <ParamField path="rootLazy" type="boolean" default="true">
+      When `false`, eagerly computes aggregates on the root node, which improves aggregation latency at the expense of making all writes contend with each other. Only recommended for read-heavy workloads.
+    </ParamField>
+
+    <ParamField path="namespace" type="ConvexValue | undefined">
+      Optional namespace for partitioning the data structure
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Example
+
+```typescript
+import { internalMutation } from "./_generated/server";
+
+export const resetLeaderboard = internalMutation(async (ctx) => {
+  // Clear with default settings (maxNodeSize=16, rootLazy=true)
+  await aggregateByScore.clear(ctx);
+  
+  // Or customize the settings
+  await aggregateByScore.clear(ctx, {
+    maxNodeSize: 32,  // Larger nodes for fewer writes
+    rootLazy: false,  // Eager aggregation for faster reads
+  });
+});
+```
+
+<Note>
+  If the tree does not exist yet, `clear()` will initialize it with the provided settings (or defaults).
+</Note>
+
+---
+
+## makeRootLazy()
+
+Convert the root node to lazy mode to reduce write contention.
+
+```typescript
+async makeRootLazy(
+  ctx: RunMutationCtx,
+  namespace: Namespace
+): Promise<void>
+```
+
+<ParamField path="ctx" type="RunMutationCtx" required>
+  Convex mutation context with `runMutation` method
+</ParamField>
+
+<ParamField path="namespace" type="Namespace" required>
+  The namespace of the tree to modify
+</ParamField>
+
+### When to use
+
+If `rootLazy` is `false` (can be set via `clear()`), the aggregate data structure writes to a single root node on every insert/delete/replace, which can cause contention.
+
+For data structures with frequent writes, call `makeRootLazy()` to remove the frequent writes to the root node. With a lazy root node, updates will only contend with other updates to the same shard of the tree.
+
+### Example
+
+```typescript
+import { internalMutation } from "./_generated/server";
+
+export const optimizeForWrites = internalMutation(async (ctx) => {
+  // Convert to lazy root to reduce contention
+  await aggregateByScore.makeRootLazy(ctx, undefined);
+});
+```
+
+<Tip>
+  The number of shards is determined by `maxNodeSize`, so larger `maxNodeSize` values can also help reduce contention.
+</Tip>
+
+---
+
+## clearAll()
+
+Clear all namespaces in the aggregate data structure.
+
+```typescript
+async clearAll(
+  ctx: RunMutationCtx & RunQueryCtx,
+  opts?: {
+    maxNodeSize?: number;
+    rootLazy?: boolean;
+  }
+): Promise<void>
+```
+
+<ParamField path="ctx" type="RunMutationCtx & RunQueryCtx" required>
+  Convex context with both `runMutation` and `runQuery` methods
+</ParamField>
+
+<ParamField path="opts" type="object">
+  Configuration options to apply to all namespaces
+
+  <Expandable title="properties">
+    <ParamField path="maxNodeSize" type="number" default="16">
+      Controls the data structure's width and depth
+    </ParamField>
+
+    <ParamField path="rootLazy" type="boolean" default="true">
+      When `false`, eagerly computes aggregates on the root node
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Example
+
+```typescript
+import { internalMutation } from "./_generated/server";
+
+export const resetAllAggregates = internalMutation(async (ctx) => {
+  // Clear all namespaces with custom settings
+  await aggregate.clearAll(ctx, {
+    maxNodeSize: 32,
+    rootLazy: true,
+  });
+});
+```
+
+<Warning>
+  This method clears **all** namespaces in the data structure. Use with caution in production environments.
+</Warning>
+
+### Implementation details
+
+The method iterates through all namespaces using `iterNamespaces()` and calls `clear()` on each one. It also ensures at least one tree is created at `namespace=undefined` where default settings are stored.

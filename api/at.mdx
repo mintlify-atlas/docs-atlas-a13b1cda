@@ -1,0 +1,221 @@
+---
+title: 'at() and atBatch()'
+description: 'Get items at specific offsets/ranks'
+---
+
+## at()
+
+Returns the item at the given offset/index/rank in the order of key, within the bounds. Zero-indexed, so `at(0)` is the smallest key within the bounds.
+
+If offset is negative, it counts from the end of the list, so `at(-1)` is the item with the largest key within the bounds.
+
+### Signature
+
+```typescript
+async at(
+  ctx: RunQueryCtx,
+  offset: number,
+  ...opts: NamespacedOpts<{ bounds?: Bounds<K, ID> }, Namespace>
+): Promise<Item<K, ID>>
+```
+
+### Parameters
+
+<ParamField path="ctx" type="RunQueryCtx" required>
+  Query context with `runQuery` method (e.g., from a Convex query or action)
+</ParamField>
+
+<ParamField path="offset" type="number" required>
+  Zero-based index of the item to retrieve. Negative values count from the end.
+  - `0` returns the first item (smallest key)
+  - `-1` returns the last item (largest key)
+  - `-2` returns the second-to-last item, etc.
+</ParamField>
+
+<ParamField path="opts" type="object">
+  Optional configuration object
+  
+  <Expandable title="properties">
+    <ParamField path="bounds" type="Bounds<K, ID>">
+      Key range to search within. If not provided, searches all items.
+      
+      <Expandable title="bounds properties">
+        <ParamField path="lower" type="Bound<K, ID>">
+          Lower bound with `key`, optional `id`, and `inclusive` flag
+        </ParamField>
+        
+        <ParamField path="upper" type="Bound<K, ID>">
+          Upper bound with `key`, optional `id`, and `inclusive` flag
+        </ParamField>
+        
+        <ParamField path="prefix" type="K">
+          Prefix to match (alternative to specifying lower/upper bounds)
+        </ParamField>
+      </Expandable>
+    </ParamField>
+    
+    <ParamField path="namespace" type="Namespace">
+      Namespace to query within (if using namespaced aggregates)
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Returns
+
+<ResponseField name="item" type="Item<K, ID>">
+  The item at the specified offset
+  
+  <Expandable title="Item properties">
+    <ResponseField name="key" type="K">
+      The sort key of the item
+    </ResponseField>
+    
+    <ResponseField name="id" type="ID">
+      The unique identifier of the item
+    </ResponseField>
+    
+    <ResponseField name="sumValue" type="number">
+      The sum value associated with this item (defaults to 0 if not set)
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Examples
+
+<Tabs>
+  <Tab title="Get Score at Rank">
+    ```typescript
+    export const scoreAtRank = query({
+      args: {
+        rank: v.number(),
+      },
+      handler: async (ctx, { rank }) => {
+        const score = await aggregateByScore.at(ctx, rank);
+        return await ctx.db.get(score.id);
+      },
+    });
+    ```
+  </Tab>
+  
+  <Tab title="Get Top and Bottom Scores">
+    ```typescript
+    export const topAndBottomScores = query({
+      handler: async (ctx) => {
+        // Get top score (rank 0)
+        const topScore = await aggregateByScore.at(ctx, 0);
+        
+        // Get bottom score (rank -1)
+        const bottomScore = await aggregateByScore.at(ctx, -1);
+        
+        return {
+          top: await ctx.db.get(topScore.id),
+          bottom: await ctx.db.get(bottomScore.id),
+        };
+      },
+    });
+    ```
+  </Tab>
+  
+  <Tab title="Get Page of Scores">
+    ```typescript
+    export const pageOfScores = query({
+      args: {
+        offset: v.number(),
+        numItems: v.number(),
+      },
+      handler: async (ctx, { offset, numItems }) => {
+        const firstInPage = await aggregateByScore.at(ctx, offset);
+
+        const page = await aggregateByScore.paginate(ctx, {
+          bounds: {
+            lower: {
+              key: firstInPage.key,
+              id: firstInPage.id,
+              inclusive: true,
+            },
+          },
+          pageSize: numItems,
+        });
+
+        const scores = await Promise.all(
+          page.page.map((doc) => ctx.db.get(doc.id)),
+        );
+
+        return scores.filter((d) => d != null);
+      },
+    });
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## atBatch()
+
+Batch version of `at()` - returns items at multiple offsets in a single call.
+
+### Signature
+
+```typescript
+async atBatch(
+  ctx: RunQueryCtx,
+  queries: NamespacedOptsBatch<
+    { offset: number; bounds?: Bounds<K, ID> },
+    Namespace
+  >
+): Promise<Item<K, ID>[]>
+```
+
+### Parameters
+
+<ParamField path="ctx" type="RunQueryCtx" required>
+  Query context with `runQuery` method
+</ParamField>
+
+<ParamField path="queries" type="Array<object>" required>
+  Array of query objects, each specifying an offset and optional bounds/namespace
+  
+  <Expandable title="query object properties">
+    <ParamField path="offset" type="number" required>
+      Zero-based index of the item to retrieve
+    </ParamField>
+    
+    <ParamField path="bounds" type="Bounds<K, ID>">
+      Key range to search within
+    </ParamField>
+    
+    <ParamField path="namespace" type="Namespace">
+      Namespace to query within
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Returns
+
+<ResponseField name="items" type="Item<K, ID>[]">
+  Array of items, one for each query in the input array
+</ResponseField>
+
+### Example
+
+```typescript
+export const topThreeScores = query({
+  handler: async (ctx) => {
+    const items = await aggregateByScore.atBatch(ctx, [
+      { offset: 0 },
+      { offset: 1 },
+      { offset: 2 },
+    ]);
+    
+    const scores = await Promise.all(
+      items.map((item) => ctx.db.get(item.id)),
+    );
+    
+    return scores.filter((d) => d != null);
+  },
+});
+```
+
+### Performance Note
+
+Use `atBatch()` when you need to retrieve multiple items at different offsets. It's more efficient than making multiple `at()` calls as it performs all lookups in a single operation.

@@ -1,0 +1,292 @@
+---
+title: Repairing aggregates
+description: How to fix aggregates that are out of sync with source data
+---
+
+When aggregates get out of sync with their source table, the computed values (counts, sums, ranks) will be incorrect. This guide shows you how to repair them.
+
+## When Aggregates Need Repair
+
+Aggregates can become out of sync in these situations:
+
+- A mutation updated the table but forgot to update the aggregate
+- Direct writes in the Convex Dashboard bypassed aggregate updates
+- A bug in your update logic caused inconsistencies
+- You're attaching an aggregate to an existing table with data
+
+<Warning>
+Prevention is better than repair! Use [triggers](/guides/keeping-data-in-sync) or encapsulated write functions to keep aggregates in sync automatically.
+</Warning>
+
+## Repair Strategy 1: Clear and Rebuild
+
+The simplest and safest approach is to clear the aggregate and backfill it from scratch.
+
+<Steps>
+  <Step title="Update write code to use idempotent operations">
+    First, switch your live writes to use idempotent methods so they work even during the backfill:
+
+    ```ts
+    // Change from:
+    await aggregate.insert(ctx, doc);
+    // To:
+    await aggregate.insertIfDoesNotExist(ctx, doc);
+
+    // Or use idempotent triggers:
+    triggers.register("mytable", aggregate.idempotentTrigger());
+    ```
+
+    Deploy this change before proceeding.
+  </Step>
+
+  <Step title="Clear the aggregate">
+    Reset the aggregate to empty state:
+
+    ```ts
+    export const clearAggregate = internalMutation({
+      handler: async (ctx) => {
+        await aggregate.clear(ctx);
+        // Or for namespaced aggregates:
+        await aggregate.clearAll(ctx);
+      },
+    });
+    ```
+
+    Run this from the Convex Dashboard or CLI:
+
+    ```bash
+    npx convex run clearAggregate
+    ```
+  </Step>
+
+  <Step title="Backfill from source table">
+    Use a migration to walk through all existing data:
+
+    ```ts
+    import { Migrations } from "@convex-dev/migrations";
+
+    export const migrations = new Migrations<DataModel>(components.migrations);
+
+    export const backfillAggregate = migrations.define({
+      table: "mytable",
+      migrateOne: async (ctx, doc) => {
+        await aggregate.insertIfDoesNotExist(ctx, doc);
+      },
+    });
+
+    export const runBackfill = migrations.runner(
+      internal.myfile.backfillAggregate
+    );
+    ```
+
+    Start the backfill:
+
+    ```bash
+    npx convex run runBackfill
+    ```
+  </Step>
+
+  <Step title="Switch back to regular operations">
+    Once the backfill completes, switch back to regular insert/delete/replace:
+
+    ```ts
+    // Change back from:
+    await aggregate.insertIfDoesNotExist(ctx, doc);
+    // To:
+    await aggregate.insert(ctx, doc);
+
+    // Or regular triggers:
+    triggers.register("mytable", aggregate.trigger());
+    ```
+
+    Deploy this final change.
+  </Step>
+</Steps>
+
+<Info>
+For large tables (millions of documents), the backfill may take several minutes to hours. The migration framework handles pagination and progress tracking automatically.
+</Info>
+
+## Repair Strategy 2: Component Rename
+
+Instead of clearing, you can create a fresh aggregate by renaming the component.
+
+```ts
+// In convex.config.ts
+
+// Old component (keep until new one is ready):
+// app.use(aggregate, { name: "myAggregate" });
+
+// New component:
+app.use(aggregate, { name: "myAggregate_v2" });
+```
+
+Then update your code to use the new component:
+
+```ts
+// Old:
+// const myAgg = new TableAggregate(...)(components.myAggregate, ...);
+
+// New:
+const myAgg = new TableAggregate(...)(components.myAggregate_v2, ...);
+```
+
+Follow the same backfill process as above. Once complete, you can remove the old component from your config.
+
+<Tip>
+This approach lets you keep the old aggregate running while you build the new one, allowing you to compare results.
+</Tip>
+
+## Repair Strategy 3: Diff and Patch (Advanced)
+
+For very large datasets where clearing and rebuilding is too slow, you can diff the source table against the aggregate and patch only the differences.
+
+<Warning>
+This approach is complex and error-prone. Only use it if clearing and rebuilding takes too long.
+</Warning>
+
+```ts
+export const repairAggregate = internalMutation({
+  handler: async (ctx) => {
+    // Get all items from source table
+    const tableItems = new Map();
+    for await (const doc of ctx.db.query("mytable").collect()) {
+      tableItems.set(doc._id, doc);
+    }
+
+    // Get all items from aggregate
+    const aggregateItems = new Map();
+    for await (const item of aggregate.iter(ctx)) {
+      aggregateItems.set(item.id, item);
+    }
+
+    // Find items in aggregate but not in table (delete these)
+    for (const [id, item] of aggregateItems) {
+      if (!tableItems.has(id)) {
+        await aggregate.deleteIfExists(ctx, item);
+      }
+    }
+
+    // Find items in table but not in aggregate (insert these)
+    // Or items that changed (replace these)
+    for (const [id, doc] of tableItems) {
+      const existingItem = aggregateItems.get(id);
+      if (!existingItem) {
+        await aggregate.insertIfDoesNotExist(ctx, doc);
+      } else {
+        // Check if key or sumValue changed
+        const currentKey = getSortKey(doc); // Your sortKey function
+        const currentSum = getSumValue(doc); // Your sumValue function
+        
+        if (currentKey !== existingItem.key || 
+            currentSum !== existingItem.sumValue) {
+          await aggregate.replaceOrInsert(ctx, doc, doc);
+        }
+      }
+    }
+  },
+});
+```
+
+<Note>
+This approach requires loading all IDs into memory. For tables with millions of documents, you may need to paginate and process in batches.
+</Note>
+
+## Verifying Repairs
+
+After repairing, verify that the aggregate matches your source data:
+
+```ts
+export const verifyAggregate = query({
+  handler: async (ctx) => {
+    // Count from source table
+    const tableCount = await ctx.db.query("mytable").collect().then(docs => docs.length);
+    
+    // Count from aggregate
+    const aggregateCount = await aggregate.count(ctx);
+    
+    // Compare
+    if (tableCount !== aggregateCount) {
+      console.error(`Mismatch! Table: ${tableCount}, Aggregate: ${aggregateCount}`);
+      return { status: "mismatch", tableCount, aggregateCount };
+    }
+    
+    return { status: "ok", count: tableCount };
+  },
+});
+```
+
+For sums:
+
+```ts
+export const verifySum = query({
+  handler: async (ctx) => {
+    const docs = await ctx.db.query("mytable").collect();
+    const tableSum = docs.reduce((sum, doc) => sum + doc.value, 0);
+    const aggregateSum = await aggregate.sum(ctx);
+    
+    if (Math.abs(tableSum - aggregateSum) > 0.001) {
+      console.error(`Sum mismatch! Table: ${tableSum}, Aggregate: ${aggregateSum}`);
+      return { status: "mismatch", tableSum, aggregateSum };
+    }
+    
+    return { status: "ok", sum: tableSum };
+  },
+});
+```
+
+## Preventing Future Issues
+
+Once repaired, prevent future sync issues:
+
+### 1. Use Triggers (Recommended)
+
+Automatically sync table changes to aggregates:
+
+```ts
+import { Triggers } from "convex-helpers/server/triggers";
+
+const triggers = new Triggers<DataModel>();
+triggers.register("mytable", aggregate.trigger());
+
+export const mutation = customMutation(
+  rawMutation,
+  customCtx(triggers.wrapDB)
+);
+```
+
+See [Keeping Data in Sync](/guides/keeping-data-in-sync) for details.
+
+### 2. Encapsulate Writes
+
+Keep all table writes in dedicated functions:
+
+```ts
+async function insertItem(ctx: MutationCtx, data: ItemData) {
+  const id = await ctx.db.insert("mytable", data);
+  const doc = await ctx.db.get(id);
+  await aggregate.insert(ctx, doc!);
+  return id;
+}
+
+// Always call insertItem(), never ctx.db.insert() directly
+export const createItem = mutation({
+  args: { /* ... */ },
+  handler: async (ctx, args) => {
+    return await insertItem(ctx, args);
+  },
+});
+```
+
+### 3. Disable Direct Database Writes
+
+If using the Convex Dashboard, be careful with direct writes. Consider:
+- Only allowing writes through mutations
+- Adding comments to remind team members to update aggregates
+- Using triggers so even Dashboard writes are caught
+
+## Related Documentation
+
+- [Migrations and Backfills](/guides/migrations-and-backfills) - Detailed backfill patterns
+- [Keeping Data in Sync](/guides/keeping-data-in-sync) - Prevention strategies
+- [Troubleshooting](/operations/troubleshooting) - Common issues and solutions

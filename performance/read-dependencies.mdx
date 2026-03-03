@@ -1,0 +1,146 @@
+---
+title: Read Dependencies and OCC Conflicts
+description: Understanding how read dependencies affect write throughput and cause OCC conflicts
+---
+
+## Understanding Read Dependencies
+
+When working with the Convex Aggregate component, it's important to understand how read operations create dependencies that can affect write performance and cause OCC (Optimistic Concurrency Control) conflicts.
+
+### How Read Dependencies Work
+
+The Aggregate component stores denormalized counts in an internal B-tree data structure to achieve `O(log(n))` time complexity. Data points with nearby keys may have their counts accumulated in shared internal nodes.
+
+<Note>
+  Data points with adjacent keys often share internal nodes in the aggregate tree, which means operations on these points can interfere with each other.
+</Note>
+
+### Impact on Queries
+
+When a query calls `await aggregate.count(ctx)`, it depends on the entire aggregate data structure. This has important implications:
+
+- **Reactivity**: When any mutation changes the data structure via `insert`, `delete`, or `replace`, the query automatically reruns and sends new results to the frontend
+- **Function call usage**: Frequent updates can cause large function call and bandwidth usage on Convex
+- **Spurious reruns**: Queries may rerun even when their results don't change
+
+#### Example: Adjacent Keys
+
+Imagine a leaderboard aggregate with `Key: [username, score]`. Users "Laura" and "Lauren" have adjacent keys, so their counts are accumulated in a shared internal node.
+
+```ts
+const leaderboard = new TableAggregate<{
+  Key: [string, number];
+  DataModel: DataModel;
+  TableName: "scores";
+}>(components.leaderboard, {
+  sortKey: (doc) => [doc.username, doc.score],
+});
+```
+
+In this scenario:
+- When Laura queries her own high score, she reads from the internal node shared with Lauren
+- When Lauren gets a new high score, Laura's query reruns (even though her result doesn't change)
+- The shared internal node creates a dependency between these two users
+
+### Impact on Mutations
+
+When a mutation calls `await aggregate.count(ctx)`, it needs to run transactionally relative to other mutations. Another mutation performing an `insert`, `delete`, or `replace` can cause an [OCC conflict](https://docs.convex.dev/error#1).
+
+<Warning>
+  Mutations that read from aggregate operations will conflict with other mutations that write to overlapping parts of the aggregate tree, causing them to retry or fail.
+</Warning>
+
+#### Sequential Key Problem
+
+A particularly problematic pattern occurs when using sequential keys like `_creationTime`:
+
+```ts
+const aggregate = new TableAggregate<{
+  Key: number; // _creationTime
+  DataModel: DataModel;
+  TableName: "events";
+}>(components.aggregate, {
+  sortKey: (doc) => doc._creationTime,
+});
+```
+
+**Why this causes issues:**
+- Each new data point is added to the same part of the data structure (the end)
+- Since `_creationTime` keeps increasing, all inserts target the same internal nodes
+- All inserts wait for each other, preventing parallel execution
+- No mutations can run concurrently
+
+<Tip>
+  Avoid using strictly sequential keys like `_creationTime` as the only sort key if you need high write throughput.
+</Tip>
+
+### Namespacing as a Solution
+
+Namespaces provide isolation by giving each namespace its own data structure:
+
+```ts
+const leaderboard = new TableAggregate<{
+  Namespace: string; // username
+  Key: number; // score
+  DataModel: DataModel;
+  TableName: "scores";
+}>(components.leaderboard, {
+  namespace: (doc) => doc.username,
+  sortKey: (doc) => doc.score,
+});
+```
+
+**Benefits:**
+- Each namespace has its own data structure with no overlap in internal nodes
+- "Laura" and "Lauren" never have contention, even with similar usernames
+- Writes to different namespaces can execute in parallel
+- Queries on one namespace don't rerun when other namespaces change
+
+<Note>
+  Use namespacing when you have natural partitions in your data and don't need to aggregate across those partitions.
+</Note>
+
+### Trade-offs: Namespacing vs. Bounds
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| **Namespace-based partitioning** | No write contention between namespaces; Maximum write throughput | Cannot aggregate across namespaces; Must always specify namespace |
+| **Bounds-based filtering** | Can aggregate globally; Flexible querying | Write contention for nearby keys; May need careful key design |
+
+### Best Practices
+
+1. **Choose the right key structure**: Consider how your queries and writes will interact when designing your sort keys
+
+2. **Use namespaces for high-throughput writes**: When data is naturally partitioned and you don't need global aggregation
+
+3. **Profile your workload**: Monitor OCC conflicts and query reruns to identify problematic patterns
+
+4. **Combine strategies**: Use namespaces for the primary partition and bounds for secondary filtering
+
+```ts
+const gameScores = new TableAggregate<{
+  Namespace: Id<"games">;
+  Key: [string, number]; // [username, score]
+  DataModel: DataModel;
+  TableName: "scores";
+}>(components.gameScores, {
+  namespace: (doc) => doc.gameId,
+  sortKey: (doc) => [doc.username, doc.score],
+});
+
+// Query a specific user's scores in a specific game
+const userScores = await gameScores.count(ctx, {
+  namespace: gameId,
+  bounds: { prefix: [username] },
+});
+```
+
+This approach provides:
+- Isolation between different games (via namespace)
+- Ability to filter by user within a game (via bounds)
+- Good write throughput as different games don't interfere
+
+## See Also
+
+- [Lazy Aggregation](/performance/lazy-aggregation) - Reduce write contention with lazy root nodes
+- [Optimizing Throughput](/performance/optimizing-throughput) - Strategies for maximizing write performance

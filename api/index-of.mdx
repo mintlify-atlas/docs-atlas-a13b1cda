@@ -1,0 +1,178 @@
+---
+title: 'indexOf()'
+description: 'Find the rank/offset of a key'
+---
+
+## indexOf()
+
+Returns the rank/offset/index of the given key, within the bounds.
+
+Specifically, it returns the index of the first item with:
+- `key >= the given key` if `order` is `"asc"` (default)
+- `key <= the given key` if `order` is `"desc"`
+
+### Signature
+
+```typescript
+async indexOf(
+  ctx: RunQueryCtx,
+  key: K,
+  ...opts: NamespacedOpts<
+    { id?: ID; bounds?: Bounds<K, ID>; order?: "asc" | "desc" },
+    Namespace
+  >
+): Promise<number>
+```
+
+### Parameters
+
+<ParamField path="ctx" type="RunQueryCtx" required>
+  Query context with `runQuery` method (e.g., from a Convex query or action)
+</ParamField>
+
+<ParamField path="key" type="K" required>
+  The key to search for. The type depends on how your aggregate is configured.
+</ParamField>
+
+<ParamField path="opts" type="object">
+  Optional configuration object
+  
+  <Expandable title="properties">
+    <ParamField path="id" type="ID">
+      Optional ID to disambiguate when multiple items have the same key
+    </ParamField>
+    
+    <ParamField path="bounds" type="Bounds<K, ID>">
+      Key range to search within. If not provided, searches all items.
+      
+      <Expandable title="bounds properties">
+        <ParamField path="lower" type="Bound<K, ID>">
+          Lower bound with `key`, optional `id`, and `inclusive` flag
+        </ParamField>
+        
+        <ParamField path="upper" type="Bound<K, ID>">
+          Upper bound with `key`, optional `id`, and `inclusive` flag
+        </ParamField>
+        
+        <ParamField path="prefix" type="K">
+          Prefix to match (alternative to specifying lower/upper bounds)
+        </ParamField>
+      </Expandable>
+    </ParamField>
+    
+    <ParamField path="order" type="'asc' | 'desc'" default="'asc'">
+      Search order:
+      - `"asc"`: Find first item with key greater than or equal to search key
+      - `"desc"`: Find first item with key less than or equal to search key
+    </ParamField>
+    
+    <ParamField path="namespace" type="Namespace">
+      Namespace to query within (if using namespaced aggregates)
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Returns
+
+<ResponseField name="index" type="number">
+  The zero-based index/rank of the item. Returns 0 if the key would be the first item, 1 for the second item, etc.
+</ResponseField>
+
+### Example
+
+```typescript
+/**
+ * Where does a score rank in the overall leaderboard?
+ */
+export const rankOfScore = query({
+  args: {
+    score: v.number(),
+  },
+  handler: async (ctx, args) => {
+    // Note: scores are stored as negative values for descending sort
+    return await aggregateByScore.indexOf(ctx, -args.score);
+  },
+});
+```
+
+### Use Cases
+
+<Tabs>
+  <Tab title="Leaderboard Rank">
+    Find where a player ranks in a leaderboard:
+    
+    ```typescript
+    export const getPlayerRank = query({
+      args: { playerId: v.id("players") },
+      handler: async (ctx, { playerId }) => {
+        const player = await ctx.db.get(playerId);
+        if (!player) return null;
+        
+        // Get the rank of this player's score
+        const rank = await aggregateByScore.indexOf(
+          ctx,
+          -player.score
+        );
+        
+        return {
+          player: player.name,
+          rank: rank + 1, // Convert to 1-based rank
+          score: player.score,
+        };
+      },
+    });
+    ```
+  </Tab>
+  
+  <Tab title="Percentile Calculation">
+    Calculate what percentile a score represents:
+    
+    ```typescript
+    export const scorePercentile = query({
+      args: { score: v.number() },
+      handler: async (ctx, { score }) => {
+        const total = await aggregateByScore.count(ctx);
+        if (total === 0) return null;
+        
+        const rank = await aggregateByScore.indexOf(ctx, -score);
+        const percentile = ((total - rank) / total) * 100;
+        
+        return {
+          score,
+          rank: rank + 1,
+          percentile: Math.round(percentile),
+        };
+      },
+    });
+    ```
+  </Tab>
+  
+  <Tab title="Range Search">
+    Find the rank within a bounded range:
+    
+    ```typescript
+    export const rankInCategory = query({
+      args: {
+        category: v.string(),
+        score: v.number(),
+      },
+      handler: async (ctx, { category, score }) => {
+        return await aggregateByCategory.indexOf(
+          ctx,
+          [category, -score],
+          {
+            bounds: { prefix: [category] },
+          }
+        );
+      },
+    });
+    ```
+  </Tab>
+</Tabs>
+
+### Notes
+
+- The returned index is zero-based, meaning the first item has index 0
+- When using negative keys for descending sort (like `-score`), remember to negate the value when calling `indexOf()`
+- If the exact key doesn't exist, `indexOf()` returns where it would be inserted in the sorted order
+- Use the `id` parameter to disambiguate when multiple items have the same key

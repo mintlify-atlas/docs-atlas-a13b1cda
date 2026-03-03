@@ -1,0 +1,267 @@
+---
+title: 'min(), max(), random()'
+description: 'Get minimum, maximum, or random items'
+---
+
+## min()
+
+Gets the minimum item within the given bounds (the item with the smallest key).
+
+### Signature
+
+```typescript
+async min(
+  ctx: RunQueryCtx,
+  ...opts: NamespacedOpts<{ bounds?: Bounds<K, ID> }, Namespace>
+): Promise<Item<K, ID> | null>
+```
+
+### Parameters
+
+<ParamField path="ctx" type="RunQueryCtx" required>
+  Query context with `runQuery` method (e.g., from a Convex query or action)
+</ParamField>
+
+<ParamField path="opts" type="object">
+  Optional configuration object
+  
+  <Expandable title="properties">
+    <ParamField path="bounds" type="Bounds<K, ID>">
+      Key range to search within. If not provided, searches all items.
+    </ParamField>
+    
+    <ParamField path="namespace" type="Namespace">
+      Namespace to query within (if using namespaced aggregates)
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Returns
+
+<ResponseField name="item" type="Item<K, ID> | null">
+  The item with the smallest key, or `null` if no items exist within the bounds
+  
+  <Expandable title="Item properties">
+    <ResponseField name="key" type="K">
+      The sort key of the item
+    </ResponseField>
+    
+    <ResponseField name="id" type="ID">
+      The unique identifier of the item
+    </ResponseField>
+    
+    <ResponseField name="sumValue" type="number">
+      The sum value associated with this item
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Example
+
+```typescript
+export const lowestScore = query({
+  handler: async (ctx) => {
+    const item = await aggregateByScore.min(ctx);
+    if (!item) return null;
+    return await ctx.db.get(item.id);
+  },
+});
+```
+
+---
+
+## max()
+
+Gets the maximum item within the given bounds (the item with the largest key).
+
+### Signature
+
+```typescript
+async max(
+  ctx: RunQueryCtx,
+  ...opts: NamespacedOpts<{ bounds?: Bounds<K, ID> }, Namespace>
+): Promise<Item<K, ID> | null>
+```
+
+### Parameters
+
+<ParamField path="ctx" type="RunQueryCtx" required>
+  Query context with `runQuery` method
+</ParamField>
+
+<ParamField path="opts" type="object">
+  Optional configuration object
+  
+  <Expandable title="properties">
+    <ParamField path="bounds" type="Bounds<K, ID>">
+      Key range to search within. If not provided, searches all items.
+    </ParamField>
+    
+    <ParamField path="namespace" type="Namespace">
+      Namespace to query within (if using namespaced aggregates)
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Returns
+
+<ResponseField name="item" type="Item<K, ID> | null">
+  The item with the largest key, or `null` if no items exist within the bounds
+</ResponseField>
+
+### Example
+
+<Tabs>
+  <Tab title="User High Score">
+    ```typescript
+    export const userHighScore = query({
+      args: {
+        name: v.string(),
+      },
+      handler: async (ctx, args) => {
+        const item = await aggregateScoreByUser.max(ctx, {
+          bounds: { prefix: [args.name] },
+        });
+        if (!item) return null;
+        return item.sumValue;
+      },
+    });
+    ```
+  </Tab>
+  
+  <Tab title="Top Score Overall">
+    ```typescript
+    export const topScore = query({
+      handler: async (ctx) => {
+        const item = await aggregateByScore.max(ctx);
+        if (!item) return null;
+        
+        const doc = await ctx.db.get(item.id);
+        return {
+          player: doc?.name,
+          score: doc?.score,
+        };
+      },
+    });
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## random()
+
+Gets a uniformly random item within the given bounds.
+
+### Signature
+
+```typescript
+async random(
+  ctx: RunQueryCtx,
+  ...opts: NamespacedOpts<{ bounds?: Bounds<K, ID> }, Namespace>
+): Promise<Item<K, ID> | null>
+```
+
+### Parameters
+
+<ParamField path="ctx" type="RunQueryCtx" required>
+  Query context with `runQuery` method
+</ParamField>
+
+<ParamField path="opts" type="object">
+  Optional configuration object
+  
+  <Expandable title="properties">
+    <ParamField path="bounds" type="Bounds<K, ID>">
+      Key range to search within. If not provided, selects from all items.
+    </ParamField>
+    
+    <ParamField path="namespace" type="Namespace">
+      Namespace to query within (if using namespaced aggregates)
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Returns
+
+<ResponseField name="item" type="Item<K, ID> | null">
+  A randomly selected item, or `null` if no items exist within the bounds
+</ResponseField>
+
+### Example
+
+```typescript
+export const randomScore = query({
+  handler: async (ctx) => {
+    const item = await aggregateByScore.random(ctx);
+    if (!item) return null;
+    return await ctx.db.get(item.id);
+  },
+});
+```
+
+### Implementation Note
+
+The `random()` method works by:
+1. Counting all items within the bounds using `count()`
+2. Generating a random index between 0 and count-1
+3. Retrieving the item at that index using `at()`
+
+```typescript
+async random(
+  ctx: RunQueryCtx,
+  ...opts: NamespacedOpts<{ bounds?: Bounds<K, ID> }, Namespace>
+): Promise<Item<K, ID> | null> {
+  const count = await this.count(ctx, ...opts);
+  if (count === 0) {
+    return null;
+  }
+  const index = Math.floor(Math.random() * count);
+  return await this.at(ctx, index, ...opts);
+}
+```
+
+### Use Cases
+
+<Tabs>
+  <Tab title="Random Matchmaking">
+    Select a random player for matchmaking:
+    
+    ```typescript
+    export const findRandomOpponent = query({
+      args: { minRating: v.number(), maxRating: v.number() },
+      handler: async (ctx, { minRating, maxRating }) => {
+        const item = await aggregateByRating.random(ctx, {
+          bounds: {
+            lower: { key: minRating, inclusive: true },
+            upper: { key: maxRating, inclusive: true },
+          },
+        });
+        
+        if (!item) return null;
+        return await ctx.db.get(item.id);
+      },
+    });
+    ```
+  </Tab>
+  
+  <Tab title="Featured Content">
+    Pick a random high-scoring post to feature:
+    
+    ```typescript
+    export const featuredPost = query({
+      handler: async (ctx) => {
+        // Get random post from top 100
+        const item = await postsByScore.random(ctx, {
+          bounds: {
+            lower: { key: -1000, inclusive: true },
+          },
+        });
+        
+        if (!item) return null;
+        return await ctx.db.get(item.id);
+      },
+    });
+    ```
+  </Tab>
+</Tabs>

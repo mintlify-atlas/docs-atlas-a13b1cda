@@ -1,0 +1,461 @@
+---
+title: "TableAggregate"
+description: "Aggregate class that automatically synchronizes with Convex tables using triggers"
+---
+
+## Overview
+
+The `TableAggregate` class extends `Aggregate` to automatically synchronize with a Convex table. It computes keys and sumValues from table documents and provides trigger functions to keep the aggregate in sync with table changes.
+
+Use `TableAggregate` when:
+- You want to aggregate data from an existing Convex table
+- You need automatic synchronization with table inserts, updates, and deletes
+- You want to compute keys and sumValues dynamically from documents
+
+For manual control over keys and IDs, see [DirectAggregate](/api/direct-aggregate).
+
+## Class Signature
+
+```typescript
+class TableAggregate<T extends AnyTableAggregateType> extends Aggregate<
+  T["Key"],
+  GenericId<T["TableName"]>,
+  TableAggregateNamespace<T>
+>
+```
+
+### Type Parameter
+
+<ParamField path="T" type="TableAggregateType<K, DataModel, TableName, Namespace>" required>
+  Type definition specifying the key type, data model, table name, and optional namespace.
+</ParamField>
+
+### TableAggregateType
+
+```typescript
+type TableAggregateType<
+  K extends Key,
+  DataModel extends GenericDataModel,
+  TableName extends TableNamesInDataModel<DataModel>,
+  Namespace extends ConvexValue | undefined = undefined,
+> = {
+  Key: K;
+  DataModel: DataModel;
+  TableName: TableName;
+  Namespace?: Namespace;
+}
+```
+
+<ParamField path="Key" type="K extends Key" required>
+  The type of keys computed from documents for sorting and querying.
+</ParamField>
+
+<ParamField path="DataModel" type="GenericDataModel" required>
+  Your Convex data model type.
+</ParamField>
+
+<ParamField path="TableName" type="TableNamesInDataModel<DataModel>" required>
+  The name of the table to synchronize with.
+</ParamField>
+
+<ParamField path="Namespace" type="ConvexValue | undefined" default="undefined">
+  Optional namespace type for multi-tenant data isolation.
+</ParamField>
+
+## Constructor
+
+```typescript
+constructor(
+  component: ComponentApi,
+  options: {
+    sortKey: (d: TableAggregateDocument<T>) => T["Key"];
+    sumValue?: (d: TableAggregateDocument<T>) => number;
+    namespace?: (d: TableAggregateDocument<T>) => TableAggregateNamespace<T>;
+  }
+)
+```
+
+<ParamField path="component" type="ComponentApi" required>
+  The Convex Aggregate component API instance.
+</ParamField>
+
+<ParamField path="options.sortKey" type="(doc) => K" required>
+  Function that computes the sort key from a document.
+</ParamField>
+
+<ParamField path="options.sumValue" type="(doc) => number">
+  Optional function that computes the numeric value to aggregate. Defaults to 0.
+</ParamField>
+
+<ParamField path="options.namespace" type="(doc) => Namespace">
+  Optional function that computes the namespace from a document. Required if Namespace is not undefined.
+</ParamField>
+
+### Example
+
+```typescript
+import { components } from "convex/_generated/api";
+import { TableAggregate } from "@convex-dev/aggregate";
+import { DataModel } from "convex/_generated/dataModel";
+
+type LeaderboardType = {
+  Key: number;
+  DataModel: DataModel;
+  TableName: "users";
+};
+
+const leaderboard = new TableAggregate<LeaderboardType>(
+  components.aggregate,
+  {
+    sortKey: (user) => user.score,
+    sumValue: (user) => 1, // Count users
+  }
+);
+
+// Use with triggers
+export const onUserChange = triggers.register(
+  "users",
+  leaderboard.trigger()
+);
+```
+
+## Write Methods
+
+These methods accept document objects instead of separate key/id parameters.
+
+### insert
+
+Insert a document into the aggregate.
+
+```typescript
+async insert(
+  ctx: RunMutationCtx,
+  doc: TableAggregateDocument<T>
+): Promise<void>
+```
+
+<ParamField path="ctx" type="RunMutationCtx" required>
+  The Convex mutation context.
+</ParamField>
+
+<ParamField path="doc" type="DocumentByName<DataModel, TableName>" required>
+  The document to insert. The key, ID, sumValue, and namespace are computed from this document using the constructor options.
+</ParamField>
+
+#### Example
+
+```typescript
+const user = await ctx.db.get(userId);
+if (user) {
+  await leaderboard.insert(ctx, user);
+}
+```
+
+### delete
+
+Delete a document from the aggregate.
+
+```typescript
+async delete(
+  ctx: RunMutationCtx,
+  doc: TableAggregateDocument<T>
+): Promise<void>
+```
+
+<ParamField path="ctx" type="RunMutationCtx" required>
+  The Convex mutation context.
+</ParamField>
+
+<ParamField path="doc" type="DocumentByName<DataModel, TableName>" required>
+  The document to delete.
+</ParamField>
+
+#### Example
+
+```typescript
+const user = await ctx.db.get(userId);
+if (user) {
+  await leaderboard.delete(ctx, user);
+}
+```
+
+### replace
+
+Update a document in the aggregate.
+
+```typescript
+async replace(
+  ctx: RunMutationCtx,
+  oldDoc: TableAggregateDocument<T>,
+  newDoc: TableAggregateDocument<T>
+): Promise<void>
+```
+
+<ParamField path="ctx" type="RunMutationCtx" required>
+  The Convex mutation context.
+</ParamField>
+
+<ParamField path="oldDoc" type="DocumentByName<DataModel, TableName>" required>
+  The old document (before the update).
+</ParamField>
+
+<ParamField path="newDoc" type="DocumentByName<DataModel, TableName>" required>
+  The new document (after the update).
+</ParamField>
+
+#### Example
+
+```typescript
+const oldUser = { ...user };
+const newUser = await ctx.db.patch(userId, { score: newScore });
+await leaderboard.replace(ctx, oldUser, newUser);
+```
+
+## Idempotent Write Methods
+
+### insertIfDoesNotExist
+
+```typescript
+async insertIfDoesNotExist(
+  ctx: RunMutationCtx,
+  doc: TableAggregateDocument<T>
+): Promise<void>
+```
+
+### deleteIfExists
+
+```typescript
+async deleteIfExists(
+  ctx: RunMutationCtx,
+  doc: TableAggregateDocument<T>
+): Promise<void>
+```
+
+### replaceOrInsert
+
+```typescript
+async replaceOrInsert(
+  ctx: RunMutationCtx,
+  oldDoc: TableAggregateDocument<T>,
+  newDoc: TableAggregateDocument<T>
+): Promise<void>
+```
+
+## Query Methods
+
+### indexOfDoc
+
+Returns the rank/offset/index of a document within the bounds.
+
+```typescript
+async indexOfDoc(
+  ctx: RunQueryCtx,
+  doc: TableAggregateDocument<T>,
+  opts?: {
+    id?: GenericId<T["TableName"]>;
+    bounds?: Bounds<T["Key"], GenericId<T["TableName"]>>;
+    order?: "asc" | "desc";
+  }
+): Promise<number>
+```
+
+This differs from `indexOf` in that it takes the document rather than the key. The namespace is computed from the document.
+
+<ParamField path="doc" type="DocumentByName<DataModel, TableName>" required>
+  The document to find the index of.
+</ParamField>
+
+<ParamField path="opts.id" type="GenericId<TableName>">
+  Optional ID for tie-breaking.
+</ParamField>
+
+<ParamField path="opts.bounds" type="Bounds<K, ID>">
+  Optional bounds to search within.
+</ParamField>
+
+<ParamField path="opts.order" type="'asc' | 'desc'" default="'asc'">
+  Search direction.
+</ParamField>
+
+#### Example
+
+```typescript
+const user = await ctx.db.get(userId);
+if (user) {
+  const rank = await leaderboard.indexOfDoc(ctx, user);
+  console.log(`User rank: ${rank + 1}`);
+}
+```
+
+## Trigger Functions
+
+### trigger
+
+Returns a trigger function that automatically updates the aggregate on table changes.
+
+```typescript
+trigger<Ctx extends RunMutationCtx>(): TableAggregateTrigger<Ctx, T>
+```
+
+Returns a trigger function with signature:
+
+```typescript
+type Trigger<Ctx, DataModel, TableName> = (
+  ctx: Ctx,
+  change: Change<DataModel, TableName>
+) => Promise<void>
+```
+
+The trigger automatically:
+- Calls `insert()` for insert operations
+- Calls `replace()` for update operations
+- Calls `delete()` for delete operations
+
+#### Example
+
+```typescript
+import { triggers } from "convex-helpers/server/triggers";
+
+const leaderboard = new TableAggregate<LeaderboardType>(
+  components.aggregate,
+  {
+    sortKey: (user) => user.score,
+    sumValue: (user) => 1,
+  }
+);
+
+export const onUserChange = triggers.register(
+  "users",
+  leaderboard.trigger()
+);
+```
+
+[Learn more about triggers →](/essentials/triggers)
+
+### idempotentTrigger
+
+Returns an idempotent trigger function safe for backfills.
+
+```typescript
+idempotentTrigger<Ctx extends RunMutationCtx>(): TableAggregateTrigger<Ctx, T>
+```
+
+The idempotent trigger automatically:
+- Calls `insertIfDoesNotExist()` for insert operations
+- Calls `replaceOrInsert()` for update operations
+- Calls `deleteIfExists()` for delete operations
+
+Use this during backfills to avoid errors from duplicate operations.
+
+#### Example
+
+```typescript
+// During backfill, use idempotent trigger
+export const onUserChangeBackfill = triggers.register(
+  "users",
+  leaderboard.idempotentTrigger()
+);
+
+// After backfill is complete, switch to regular trigger
+export const onUserChange = triggers.register(
+  "users",
+  leaderboard.trigger()
+);
+```
+
+## Change Type
+
+The trigger functions receive a `Change` object:
+
+```typescript
+type Change<DataModel, TableName> = {
+  id: GenericId<TableName>;
+} & (
+  | {
+      operation: "insert";
+      oldDoc: null;
+      newDoc: DocumentByName<DataModel, TableName>;
+    }
+  | {
+      operation: "update";
+      oldDoc: DocumentByName<DataModel, TableName>;
+      newDoc: DocumentByName<DataModel, TableName>;
+    }
+  | {
+      operation: "delete";
+      oldDoc: DocumentByName<DataModel, TableName>;
+      newDoc: null;
+    }
+)
+```
+
+## Complete Example
+
+```typescript
+import { components } from "convex/_generated/api";
+import { TableAggregate } from "@convex-dev/aggregate";
+import { DataModel } from "convex/_generated/dataModel";
+import { triggers } from "convex-helpers/server/triggers";
+import { query, mutation } from "./_generated/server";
+
+type LeaderboardType = {
+  Key: number;
+  DataModel: DataModel;
+  TableName: "users";
+};
+
+const leaderboard = new TableAggregate<LeaderboardType>(
+  components.aggregate,
+  {
+    sortKey: (user) => -user.score, // Negative for descending order
+    sumValue: (user) => 1, // Count of users
+  }
+);
+
+// Automatic synchronization
+export const onUserChange = triggers.register(
+  "users",
+  leaderboard.trigger()
+);
+
+// Query the leaderboard
+export const getTopUsers = query(async (ctx) => {
+  const { page } = await leaderboard.paginate(ctx, {
+    pageSize: 10,
+    order: "asc", // Asc because keys are negative
+  });
+  
+  return page.map((item) => ({
+    userId: item.id,
+    score: -item.key, // Convert back to positive
+  }));
+});
+
+// Get user rank
+export const getUserRank = query(async (ctx, { userId }) => {
+  const user = await ctx.db.get(userId);
+  if (!user) return null;
+  
+  const rank = await leaderboard.indexOfDoc(ctx, user);
+  return rank + 1; // Convert 0-indexed to 1-indexed
+});
+```
+
+## Inherited Methods
+
+`TableAggregate` inherits all query methods from [Aggregate](/api/aggregate):
+
+- [count](/api/methods/count) / [countBatch](/api/methods/count-batch)
+- [sum](/api/methods/sum) / [sumBatch](/api/methods/sum-batch)
+- [at](/api/methods/at) / [atBatch](/api/methods/at-batch)
+- [indexOf](/api/methods/index-of)
+- [min](/api/methods/min) / [max](/api/methods/max) / [random](/api/methods/random)
+- [paginate](/api/methods/paginate) / [iter](/api/methods/iter)
+- [clear](/api/methods/clear) / [makeRootLazy](/api/methods/make-root-lazy)
+
+## Related
+
+- [Aggregate](/api/aggregate) - Base class with all query methods
+- [DirectAggregate](/api/direct-aggregate) - For manual key/ID management
+- [Triggers Guide](/essentials/triggers) - Setting up table triggers
+- [Backfill Guide](/operations/backfill) - Safely backfilling existing data

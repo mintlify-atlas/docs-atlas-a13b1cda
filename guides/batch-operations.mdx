@@ -1,0 +1,231 @@
+---
+title: Batch Operations
+description: Optimize performance with batch queries for count, sum, and at operations
+---
+
+## Overview
+
+Batch operations allow you to perform multiple similar queries in a single function call, significantly improving performance. Instead of making individual calls for each query, batch methods process multiple queries internally with optimized database access.
+
+## Available Batch Methods
+
+The Aggregate component provides three batch operations:
+
+- `countBatch()` - Count items for multiple bounds
+- `sumBatch()` - Sum items for multiple bounds  
+- `atBatch()` - Get items at multiple offsets
+
+## Performance Benefits
+
+Batch operations provide substantial performance improvements:
+
+1. **Reduced function call overhead**: One call instead of many separate invocations
+2. **Optimized database access**: Fewer database round trips and better internal optimization
+3. **Improved transaction efficiency**: Smaller transaction scope with less potential for conflicts
+
+## countBatch()
+
+Count items across multiple bounds in a single call:
+
+### Basic Usage
+
+```ts
+// Instead of multiple individual calls:
+const counts = await Promise.all([
+  aggregate.count(ctx, { bounds: bounds1 }),
+  aggregate.count(ctx, { bounds: bounds2 }),
+  aggregate.count(ctx, { bounds: bounds3 }),
+]);
+
+// Use countBatch for better performance:
+const counts = await aggregate.countBatch(ctx, [
+  { bounds: bounds1 },
+  { bounds: bounds2 },
+  { bounds: bounds3 },
+]);
+```
+
+### With Namespaces
+
+```ts
+const counts = await leaderboardByGame.countBatch(ctx, [
+  { namespace: game1Id },
+  { namespace: game2Id },
+  { namespace: game3Id },
+]);
+```
+
+### Example: Count by Score Ranges
+
+```ts
+const rangeCounts = await aggregateByScore.countBatch(ctx, [
+  {
+    bounds: {
+      lower: { key: 0, inclusive: true },
+      upper: { key: 100, inclusive: false },
+    },
+  },
+  {
+    bounds: {
+      lower: { key: 100, inclusive: true },
+      upper: { key: 200, inclusive: false },
+    },
+  },
+  {
+    bounds: {
+      lower: { key: 200, inclusive: true },
+    },
+  },
+]);
+
+console.log(`0-99: ${rangeCounts[0]}`);
+console.log(`100-199: ${rangeCounts[1]}`);
+console.log(`200+: ${rangeCounts[2]}`);
+```
+
+## sumBatch()
+
+Sum values across multiple bounds:
+
+```ts
+// Sum scores for multiple users in one call
+const userSums = await aggregateScoreByUser.sumBatch(ctx, [
+  { bounds: { prefix: ["Alice"] } },
+  { bounds: { prefix: ["Bob"] } },
+  { bounds: { prefix: ["Charlie"] } },
+]);
+
+// Calculate averages
+const userCounts = await aggregateScoreByUser.countBatch(ctx, [
+  { bounds: { prefix: ["Alice"] } },
+  { bounds: { prefix: ["Bob"] } },
+  { bounds: { prefix: ["Charlie"] } },
+]);
+
+const averages = userSums.map((sum, i) => sum / userCounts[i]);
+```
+
+## atBatch()
+
+Retrieve items at multiple offsets efficiently:
+
+```ts
+// Get multiple ranks in one call
+const items = await aggregateByScore.atBatch(ctx, [
+  { offset: 0 },    // 1st place
+  { offset: 1 },    // 2nd place
+  { offset: 2 },    // 3rd place
+  { offset: 9 },    // 10th place
+]);
+
+const topTen = await Promise.all(
+  items.map((item) => ctx.db.get(item.id))
+);
+```
+
+### With Bounds
+
+```ts
+// Get percentiles within a specific range
+const count = await aggregate.count(ctx, { bounds });
+const percentiles = await aggregate.atBatch(ctx, [
+  { offset: Math.floor(count * 0.25), bounds }, // 25th percentile
+  { offset: Math.floor(count * 0.50), bounds }, // 50th percentile
+  { offset: Math.floor(count * 0.75), bounds }, // 75th percentile
+  { offset: Math.floor(count * 0.95), bounds }, // 95th percentile
+]);
+```
+
+### Negative Offsets
+
+```ts
+// Get items from the end
+const items = await aggregate.atBatch(ctx, [
+  { offset: -1 },  // Last item
+  { offset: -2 },  // Second to last
+  { offset: -10 }, // 10th from end
+]);
+```
+
+## Real-World Example: User Statistics Dashboard
+
+```ts
+export const getUsersDashboard = query({
+  args: { usernames: v.array(v.string()) },
+  handler: async (ctx, { usernames }) => {
+    // Build query arrays
+    const boundsArray = usernames.map((username) => ({
+      bounds: { prefix: [username] },
+    }));
+
+    // Fetch all data in parallel with batch operations
+    const [counts, sums, maxScores] = await Promise.all([
+      aggregateScoreByUser.countBatch(ctx, boundsArray),
+      aggregateScoreByUser.sumBatch(ctx, boundsArray),
+      Promise.all(
+        boundsArray.map((query) => aggregateScoreByUser.max(ctx, query))
+      ),
+    ]);
+
+    // Combine results
+    return usernames.map((username, i) => ({
+      username,
+      gamesPlayed: counts[i],
+      totalScore: sums[i],
+      averageScore: sums[i] / counts[i],
+      highScore: maxScores[i]?.sumValue ?? 0,
+    }));
+  },
+});
+```
+
+## When to Use Batch Operations
+
+### Good Use Cases
+
+- Fetching statistics for multiple users/groups at once
+- Calculating percentiles or distribution histograms
+- Loading data for dashboards with multiple aggregates
+- Comparing metrics across different time ranges or categories
+
+### When Individual Calls Are Fine
+
+- Single query that doesn't repeat
+- Queries with different namespaces that could conflict
+- Interactive queries where results are needed one at a time
+
+## Combining with Regular Operations
+
+You can mix batch and regular operations:
+
+```ts
+// Global count + per-user counts in parallel
+const [totalCount, userCounts] = await Promise.all([
+  aggregate.count(ctx),
+  aggregate.countBatch(ctx, [
+    { bounds: { prefix: ["Alice"] } },
+    { bounds: { prefix: ["Bob"] } },
+  ]),
+]);
+```
+
+## Best Practices
+
+1. **Use batch operations for similar queries**: Best when queries differ only in bounds or namespace
+2. **Maintain query order**: Results are returned in the same order as the input array
+3. **Handle empty results**: Check for null/undefined when using batch operations
+4. **Combine with Promise.all**: Batch different operation types in parallel
+
+```ts
+// Efficient: parallel batch operations
+const [counts, sums] = await Promise.all([
+  aggregate.countBatch(ctx, queries),
+  aggregate.sumBatch(ctx, queries),
+]);
+```
+
+## Next Steps
+
+- Learn about [Keeping Data in Sync](/guides/keeping-data-in-sync)
+- Understand [Table Aggregates](/guides/table-aggregates)
+- Explore [Direct Aggregates](/guides/direct-aggregates)

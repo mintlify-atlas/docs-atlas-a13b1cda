@@ -1,0 +1,269 @@
+---
+title: Keeping Data in Sync
+description: Ensure aggregates stay synchronized with your table data using triggers and best practices
+---
+
+## Overview
+
+For aggregates to be accurate, every table modification must update the associated aggregate. If they get out of sync, your computed aggregates will be incorrect.
+
+There are three main approaches to keeping data synchronized:
+
+1. Manual updates in every mutation
+2. Encapsulated write functions (recommended)
+3. Automatic triggers
+
+## Manual Updates
+
+The simplest approach is to manually update aggregates in each mutation:
+
+```ts
+export const addScore = mutation({
+  args: { name: v.string(), score: v.number() },
+  handler: async (ctx, args) => {
+    // Insert into table
+    const id = await ctx.db.insert("leaderboard", {
+      name: args.name,
+      score: args.score,
+    });
+
+    // Update aggregate
+    const doc = await ctx.db.get(id);
+    await aggregate.insert(ctx, doc!);
+
+    return id;
+  },
+});
+```
+
+This works but requires discipline - you must remember to update aggregates in every mutation.
+
+## Encapsulated Write Functions (Recommended)
+
+Place all table writes in separate TypeScript functions, then always call these functions from mutations:
+
+```ts
+import { MutationCtx } from "./_generated/server";
+
+// All inserts to the "scores" table go through this function
+async function insertScore(
+  ctx: MutationCtx,
+  gameId: string,
+  username: string,
+  score: number
+) {
+  const id = await ctx.db.insert("scores", { gameId, username, score });
+  const doc = await ctx.db.get(id);
+  await aggregateByGame.insert(ctx, doc!);
+  return id;
+}
+
+// All updates go through this function
+async function updateScore(
+  ctx: MutationCtx,
+  id: Id<"scores">,
+  newScore: number
+) {
+  const oldDoc = await ctx.db.get(id);
+  await ctx.db.patch(id, { score: newScore });
+  const newDoc = await ctx.db.get(id);
+  await aggregateByGame.replace(ctx, oldDoc!, newDoc!);
+}
+
+// All deletes go through this function
+async function deleteScore(ctx: MutationCtx, id: Id<"scores">) {
+  const oldDoc = await ctx.db.get(id);
+  await ctx.db.delete(id);
+  await aggregateByGame.delete(ctx, oldDoc!);
+}
+
+// Mutations call these functions
+export const playGame = mutation({
+  handler: async (ctx) => {
+    const gameId = await ctx.db.insert("games", { status: "active" });
+    await insertScore(ctx, gameId, "Alice", 100);
+    await insertScore(ctx, gameId, "Bob", 150);
+  },
+});
+```
+
+This approach:
+- Encapsulates table write logic
+- Makes updates explicit and testable
+- Prevents forgetting to update aggregates
+- Works well with TypeScript's type system
+
+## Automatic Triggers
+
+Use the Triggers helper from convex-helpers to automatically update aggregates:
+
+### Setup
+
+First, install convex-helpers:
+
+```bash
+npm install convex-helpers
+```
+
+### Register Triggers
+
+```ts
+import { Triggers } from "convex-helpers/server/triggers";
+import { customCtx, customMutation } from "convex-helpers/server/customFunctions";
+import { mutation as rawMutation } from "./_generated/server";
+import type { DataModel } from "./_generated/dataModel";
+
+const aggregateByScore = new TableAggregate<{
+  Key: number;
+  DataModel: DataModel;
+  TableName: "leaderboard";
+}>(components.aggregateByScore, {
+  sortKey: (doc) => -doc.score,
+});
+
+const aggregateScoreByUser = new TableAggregate<{
+  Key: [string, number];
+  DataModel: DataModel;
+  TableName: "leaderboard";
+}>(components.aggregateScoreByUser, {
+  sortKey: (doc) => [doc.name, doc.score],
+  sumValue: (doc) => doc.score,
+});
+
+// Set up triggers
+const triggers = new Triggers<DataModel>();
+triggers.register("leaderboard", aggregateByScore.trigger());
+triggers.register("leaderboard", aggregateScoreByUser.trigger());
+
+// Create custom mutation function
+export const mutation = customMutation(rawMutation, customCtx(triggers.wrapDB));
+```
+
+### Use Wrapped Mutations
+
+Now use your custom `mutation` function instead of the default:
+
+```ts
+export const addScore = mutation({
+  args: { name: v.string(), score: v.number() },
+  handler: async (ctx, args) => {
+    // Trigger automatically updates aggregates
+    const id = await ctx.db.insert("leaderboard", {
+      name: args.name,
+      score: args.score,
+    });
+    return id;
+  },
+});
+
+export const updateScore = mutation({
+  args: { id: v.id("leaderboard"), score: v.number() },
+  handler: async (ctx, args) => {
+    // Trigger handles aggregate.replace automatically
+    await ctx.db.patch(args.id, { score: args.score });
+  },
+});
+
+export const removeScore = mutation({
+  args: { id: v.id("leaderboard") },
+  handler: async (ctx, { id }) => {
+    // Trigger handles aggregate.delete automatically
+    await ctx.db.delete(id);
+  },
+});
+```
+
+## Trigger Behavior
+
+The trigger automatically calls:
+- `aggregate.insert(ctx, doc)` on table inserts
+- `aggregate.replace(ctx, oldDoc, newDoc)` on table updates
+- `aggregate.delete(ctx, oldDoc)` on table deletes
+
+## Multiple Aggregates on One Table
+
+You can register multiple triggers for the same table:
+
+```ts
+const triggers = new Triggers<DataModel>();
+
+// Multiple aggregates on "leaderboard"
+triggers.register("leaderboard", aggregateByScore.trigger());
+triggers.register("leaderboard", aggregateScoreByUser.trigger());
+triggers.register("leaderboard", aggregateByDate.trigger());
+
+// All three will be updated automatically
+```
+
+## Idempotent Triggers for Backfills
+
+During migrations or backfills, use idempotent triggers that don't throw errors if items already exist:
+
+```ts
+const idempotentTriggers = new Triggers<DataModel>();
+idempotentTriggers.register(
+  "leaderboard",
+  aggregateByScore.idempotentTrigger()
+);
+
+export const mutationForBackfill = customMutation(
+  rawMutation,
+  customCtx(idempotentTriggers.wrapDB)
+);
+```
+
+Idempotent triggers use:
+- `insertIfDoesNotExist` instead of `insert`
+- `replaceOrInsert` instead of `replace`
+- `deleteIfExists` instead of `delete`
+
+## Choosing an Approach
+
+### Use Manual Updates when:
+- You have only a few mutations
+- You want maximum control and visibility
+- Your team prefers explicit over implicit behavior
+
+### Use Encapsulated Functions when:
+- You want explicit control with better organization
+- You need testable, reusable write operations
+- You want type safety and refactoring support
+
+### Use Triggers when:
+- You have many mutations modifying the same table
+- You want the cleanest mutation code
+- You're comfortable with automatic behavior
+- You're already using convex-helpers
+
+## Atomicity Guarantees
+
+All approaches benefit from Convex's atomic mutations:
+
+- No race conditions between table and aggregate writes
+- No query can observe a document in the table but not in the aggregate
+- Mutations run transactionally
+
+```ts
+// This is atomic - both happen or neither happens
+export const addScore = mutation({
+  handler: async (ctx, args) => {
+    const id = await ctx.db.insert("leaderboard", args);
+    const doc = await ctx.db.get(id);
+    await aggregate.insert(ctx, doc!);
+  },
+});
+```
+
+## Debugging Out-of-Sync Aggregates
+
+If aggregates become incorrect, you may need to:
+
+1. Identify which mutations aren't updating aggregates
+2. Add missing aggregate updates
+3. Run a backfill to fix existing data (see [Migrations and Backfills](/guides/migrations-and-backfills))
+
+## Next Steps
+
+- Learn about [Migrations and Backfills](/guides/migrations-and-backfills) to fix out-of-sync data
+- Understand [Table Aggregates](/guides/table-aggregates) configuration
+- Explore [Batch Operations](/guides/batch-operations) for performance

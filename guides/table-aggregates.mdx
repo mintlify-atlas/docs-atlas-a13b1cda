@@ -1,0 +1,175 @@
+---
+title: Table Aggregates
+description: Learn how to aggregate data from Convex tables using TableAggregate
+---
+
+## Overview
+
+TableAggregate connects your Convex tables to the Aggregate component, automatically calculating counts and sums based on your table data. It defines how table data will be sorted and summed in the aggregate data structure.
+
+## Creating a TableAggregate
+
+Define a TableAggregate with type parameters specifying the key type, data model, and table name:
+
+```ts
+import { components } from "./_generated/api";
+import { DataModel } from "./_generated/dataModel";
+import { TableAggregate } from "@convex-dev/aggregate";
+
+const aggregate = new TableAggregate<{
+  Key: number;
+  DataModel: DataModel;
+  TableName: "mytable";
+}>(components.aggregate, {
+  sortKey: (doc) => doc._creationTime,
+  sumValue: (doc) => doc.value,
+});
+```
+
+### Configuration Options
+
+#### sortKey (required)
+
+Defines how documents are sorted in the aggregate. The key can be any Convex value:
+
+```ts
+// Sort by a number (like a score)
+sortKey: (doc) => doc.score
+
+// Sort by creation time
+sortKey: (doc) => doc._creationTime
+
+// Sort by multiple fields using a tuple
+sortKey: (doc) => [doc.username, doc.score]
+
+// Sort by a string
+sortKey: (doc) => doc.userId
+
+// No sorting - use null for random ordering by _id
+sortKey: (doc) => null
+```
+
+#### sumValue (optional)
+
+Defines what value to aggregate when calling `.sum()`. If not provided, sum operations will return 0:
+
+```ts
+// Sum the score field
+sumValue: (doc) => doc.score
+
+// Sum a calculated value
+sumValue: (doc) => doc.quantity * doc.price
+```
+
+#### namespace (optional)
+
+Partitions data into separate namespaces for independent aggregation and better throughput:
+
+```ts
+const leaderboardByGame = new TableAggregate<{
+  Namespace: Id<"games">;
+  Key: number;
+  DataModel: DataModel;
+  TableName: "scores";
+}>(components.leaderboardByGame, {
+  namespace: (doc) => doc.gameId,
+  sortKey: (doc) => doc.score,
+});
+
+// Query a specific namespace
+const count = await leaderboardByGame.count(ctx, { namespace: gameId });
+```
+
+## Leaderboard Example
+
+Here's a complete example for a game leaderboard:
+
+```ts
+const aggregateByScore = new TableAggregate<{
+  Key: number;
+  DataModel: DataModel;
+  TableName: "leaderboard";
+}>(components.aggregateByScore, {
+  sortKey: (doc) => -doc.score, // Negative for descending order
+});
+
+const aggregateScoreByUser = new TableAggregate<{
+  Key: [string, number];
+  DataModel: DataModel;
+  TableName: "leaderboard";
+}>(components.aggregateScoreByUser, {
+  sortKey: (doc) => [doc.name, doc.score],
+  sumValue: (doc) => doc.score,
+});
+```
+
+## Grouped Aggregation
+
+Use tuple keys to group data and query at different levels:
+
+```ts
+const aggregateByGame = new TableAggregate<{
+  Key: [string, number];
+  DataModel: DataModel;
+  TableName: "scores";
+}>(components.aggregateByGame, {
+  sortKey: (doc) => [doc.username, doc.score],
+});
+
+// Count all scores
+const totalCount = await aggregateByGame.count(ctx);
+
+// Count scores for a specific user
+const userCount = await aggregateByGame.count(ctx, {
+  bounds: { prefix: [username] },
+});
+
+// Get user's high score
+const highScore = await aggregateByGame.max(ctx, {
+  bounds: { prefix: [username] },
+});
+```
+
+## Querying Operations
+
+Once your TableAggregate is configured, you can perform various aggregation queries:
+
+```ts
+// Count total documents
+const total = await aggregate.count(ctx);
+
+// Sum values
+const totalValue = await aggregate.sum(ctx);
+
+// Calculate average
+const average = (await aggregate.sum(ctx)) / (await aggregate.count(ctx));
+
+// Get item at rank/offset
+const topScore = await aggregateByScore.at(ctx, 0);
+const doc = await ctx.db.get(topScore.id);
+
+// Find rank of a value
+const rank = await aggregateByScore.indexOf(ctx, -score);
+
+// Get min/max
+const minItem = await aggregate.min(ctx);
+const maxItem = await aggregate.max(ctx);
+```
+
+## Namespaces vs. Grouped Keys
+
+### Use Namespaces when:
+- You never need to aggregate across groups
+- You want maximum write throughput
+- Data partitions are completely independent
+
+### Use Grouped Keys when:
+- You need both grouped and global aggregation
+- You want to query across all groups
+- Lower write throughput is acceptable
+
+## Next Steps
+
+- Learn about [Direct Aggregates](/guides/direct-aggregates) for non-table data
+- Discover [Batch Operations](/guides/batch-operations) for better performance
+- Set up [Keeping Data in Sync](/guides/keeping-data-in-sync) with triggers

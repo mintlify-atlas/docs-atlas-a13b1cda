@@ -1,0 +1,352 @@
+---
+title: Migrations and Backfills
+description: Attach aggregates to existing tables and repair out-of-sync data with migrations
+---
+
+## Overview
+
+When adding aggregation to an existing table or fixing out-of-sync aggregates, you need to backfill existing data. This guide covers migration strategies using idempotent operations and the migrations component.
+
+## Adding Aggregates to Existing Tables
+
+When you add a TableAggregate to a table with existing data, the aggregate starts empty. You need to backfill all existing documents.
+
+### Migration Process
+
+Follow these steps to safely backfill an aggregate:
+
+#### 1. Use Idempotent Operations
+
+First, update your live mutations to use idempotent operations:
+
+```ts
+// Before: throws if item exists
+await aggregate.insert(ctx, doc);
+
+// After: safe during migration
+await aggregate.insertIfDoesNotExist(ctx, doc);
+```
+
+```ts
+// Before: throws if item doesn't exist
+await aggregate.replace(ctx, oldDoc, newDoc);
+
+// After: inserts if missing
+await aggregate.replaceOrInsert(ctx, oldDoc, newDoc);
+```
+
+```ts
+// Before: throws if item doesn't exist
+await aggregate.delete(ctx, doc);
+
+// After: succeeds even if missing
+await aggregate.deleteIfExists(ctx, doc);
+```
+
+#### 2. Deploy Code with Idempotent Operations
+
+Deploy your updated mutations so new writes use idempotent operations:
+
+```ts
+export const addScore = mutation({
+  handler: async (ctx, args) => {
+    const id = await ctx.db.insert("leaderboard", args);
+    const doc = await ctx.db.get(id);
+    // Safe during migration
+    await aggregate.insertIfDoesNotExist(ctx, doc!);
+  },
+});
+```
+
+#### 3. Run Background Backfill
+
+Use a paginated migration to backfill existing data:
+
+```ts
+import { Migrations } from "@convex-dev/migrations";
+import { components, internal } from "./_generated/api";
+
+export const migrations = new Migrations<DataModel>(components.migrations);
+
+export const backfillAggregatesMigration = migrations.define({
+  table: "leaderboard",
+  migrateOne: async (ctx, doc) => {
+    await aggregateByScore.insertIfDoesNotExist(ctx, doc);
+    await aggregateScoreByUser.insertIfDoesNotExist(ctx, doc);
+  },
+});
+
+// Function to run from dashboard or CLI
+export const runAggregateBackfill = migrations.runner(
+  internal.leaderboard.backfillAggregatesMigration
+);
+
+export const run = migrations.runner();
+```
+
+Run the backfill:
+
+```bash
+npx convex run leaderboard:runAggregateBackfill
+```
+
+#### 4. Switch to Regular Operations
+
+Once the backfill completes, switch back to regular operations:
+
+```ts
+export const addScore = mutation({
+  handler: async (ctx, args) => {
+    const id = await ctx.db.insert("leaderboard", args);
+    const doc = await ctx.db.get(id);
+    // Now use regular insert
+    await aggregate.insert(ctx, doc!);
+  },
+});
+```
+
+#### 5. Start Using Read Methods
+
+Now you can safely query the aggregates:
+
+```ts
+export const getLeaderboard = query({
+  handler: async (ctx) => {
+    const count = await aggregateByScore.count(ctx);
+    const topScores = await aggregateByScore.paginate(ctx, {
+      pageSize: 10,
+      order: "desc",
+    });
+    return { count, topScores };
+  },
+});
+```
+
+## Complete Example
+
+Here's a full example from the leaderboard:
+
+```ts
+import { TableAggregate } from "@convex-dev/aggregate";
+import { Migrations } from "@convex-dev/migrations";
+import { mutation, internalMutation } from "./_generated/server";
+import { components, internal } from "./_generated/api";
+import type { DataModel } from "./_generated/dataModel";
+
+const aggregateByScore = new TableAggregate<{
+  Key: number;
+  DataModel: DataModel;
+  TableName: "leaderboard";
+}>(components.aggregateByScore, {
+  sortKey: (doc) => -doc.score,
+});
+
+const aggregateScoreByUser = new TableAggregate<{
+  Key: [string, number];
+  DataModel: DataModel;
+  TableName: "leaderboard";
+}>(components.aggregateScoreByUser, {
+  sortKey: (doc) => [doc.name, doc.score],
+  sumValue: (doc) => doc.score,
+});
+
+// Set up migrations
+export const migrations = new Migrations<DataModel>(components.migrations);
+export const run = migrations.runner();
+
+export const backfillAggregatesMigration = migrations.define({
+  table: "leaderboard",
+  migrateOne: async (ctx, doc) => {
+    await aggregateByScore.insertIfDoesNotExist(ctx, doc);
+    await aggregateScoreByUser.insertIfDoesNotExist(ctx, doc);
+    console.log("backfilled", doc.name, doc.score);
+  },
+});
+
+export const runAggregateBackfill = migrations.runner(
+  internal.leaderboard.backfillAggregatesMigration
+);
+```
+
+## Using Idempotent Triggers
+
+If you're using triggers, switch to idempotent triggers during migration:
+
+```ts
+import { Triggers } from "convex-helpers/server/triggers";
+
+// For normal operations
+const triggers = new Triggers<DataModel>();
+triggers.register("leaderboard", aggregateByScore.trigger());
+
+// For migrations (use this during backfill)
+const idempotentTriggers = new Triggers<DataModel>();
+idempotentTriggers.register(
+  "leaderboard",
+  aggregateByScore.idempotentTrigger()
+);
+
+// Use idempotent version during migration
+export const mutation = customMutation(
+  rawMutation,
+  customCtx(idempotentTriggers.wrapDB)
+);
+```
+
+## Repairing Out-of-Sync Aggregates
+
+If mutations or dashboard edits updated tables without updating aggregates, they can get out of sync.
+
+### Option 1: Clear and Rebuild (Simplest)
+
+The simplest approach is to start over:
+
+```ts
+export const repairAggregates = internalMutation({
+  handler: async (ctx) => {
+    // Clear existing aggregates
+    await aggregateByScore.clear(ctx);
+    await aggregateScoreByUser.clear(ctx);
+
+    // Then run the backfill migration
+    await ctx.scheduler.runAfter(0, internal.leaderboard.runAggregateBackfill);
+  },
+});
+```
+
+Or rename the component to start fresh:
+
+```ts
+// In convex.config.ts
+// Before:
+app.use(aggregate, { name: "aggregateByScore" });
+
+// After (creates new empty aggregate):
+app.use(aggregate, { name: "aggregateByScore_v2" });
+```
+
+Then update your code to use the new component name and run the backfill.
+
+### Option 2: Diff and Patch (Advanced)
+
+Compare the source table to the aggregate and fix differences:
+
+```ts
+export const repairByDiff = internalMutation({
+  handler: async (ctx) => {
+    const tableItems = new Set<string>();
+    const aggregateItems = new Set<string>();
+
+    // Collect all table IDs
+    for await (const doc of ctx.db.query("leaderboard").iter()) {
+      tableItems.add(doc._id);
+    }
+
+    // Collect all aggregate IDs
+    for await (const item of aggregate.iter(ctx)) {
+      aggregateItems.add(item.id);
+    }
+
+    // Insert missing items
+    for (const id of tableItems) {
+      if (!aggregateItems.has(id)) {
+        const doc = await ctx.db.get(id as Id<"leaderboard">);
+        if (doc) {
+          await aggregate.insertIfDoesNotExist(ctx, doc);
+        }
+      }
+    }
+
+    // Delete extra items
+    for (const id of aggregateItems) {
+      if (!tableItems.has(id)) {
+        const item = await aggregate.at(ctx, 0); // Get item details
+        await aggregate.deleteIfExists(ctx, { key: item.key, id: item.id });
+      }
+    }
+  },
+});
+```
+
+## Migration Best Practices
+
+1. **Always test migrations on development data first**
+2. **Use idempotent operations during migration period**
+3. **Monitor backfill progress** - use console.log in migrateOne
+4. **Don't query aggregates until backfill completes**
+5. **Switch back to regular operations after backfill**
+6. **Keep migrations in version control** for repeatability
+
+## Installing the Migrations Component
+
+First, install the migrations package:
+
+```bash
+npm install @convex-dev/migrations
+```
+
+Then add it to your convex.config.ts:
+
+```ts
+import { defineApp } from "convex/server";
+import aggregate from "@convex-dev/aggregate/convex.config";
+import migrations from "@convex-dev/migrations/convex.config";
+
+const app = defineApp();
+app.use(aggregate);
+app.use(migrations);
+export default app;
+```
+
+## Common Migration Scenarios
+
+### Scenario 1: New Aggregate on Existing Table
+
+```ts
+// 1. Define aggregate
+const newAggregate = new TableAggregate(...);
+
+// 2. Use idempotent operations in mutations
+await newAggregate.insertIfDoesNotExist(ctx, doc);
+
+// 3. Deploy
+// 4. Run backfill
+// 5. Switch to regular operations
+```
+
+### Scenario 2: Changing Aggregate Configuration
+
+```ts
+// 1. Rename component in convex.config.ts
+app.use(aggregate, { name: "aggregateByScore_v2" });
+
+// 2. Update code to use new component
+const aggregateByScore = new TableAggregate(
+  components.aggregateByScore_v2,
+  { sortKey: (doc) => doc.newField } // New configuration
+);
+
+// 3. Run backfill for new aggregate
+// 4. Remove old component when ready
+```
+
+### Scenario 3: Fixing Out-of-Sync Data
+
+```ts
+// 1. Clear the aggregate
+await aggregate.clear(ctx);
+
+// 2. Run backfill migration
+await ctx.scheduler.runAfter(0, internal.table.runBackfill);
+
+// 3. Verify counts match
+const tableCount = await ctx.db.query("table").collect().then(r => r.length);
+const aggCount = await aggregate.count(ctx);
+console.log({ tableCount, aggCount });
+```
+
+## Next Steps
+
+- Learn about [Keeping Data in Sync](/guides/keeping-data-in-sync) to prevent future issues
+- Understand [Table Aggregates](/guides/table-aggregates) configuration
+- Explore the [Migrations package documentation](https://www.npmjs.com/package/@convex-dev/migrations)

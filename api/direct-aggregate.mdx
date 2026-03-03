@@ -1,0 +1,369 @@
+---
+title: "DirectAggregate"
+description: "Aggregate class with direct insert, delete, and replace operations for custom keys and IDs"
+---
+
+## Overview
+
+The `DirectAggregate` class extends `Aggregate` to provide write operations where you can insert, delete, and replace items directly with custom keys and IDs.
+
+Use `DirectAggregate` when:
+- You want full control over keys and IDs
+- You're not synchronizing with a Convex table
+- You need to manually manage the aggregate data
+
+For automatic table synchronization, see [TableAggregate](/api/table-aggregate).
+
+## Class Signature
+
+```typescript
+class DirectAggregate<T extends AnyDirectAggregateType> extends Aggregate<
+  T["Key"],
+  T["Id"],
+  DirectAggregateNamespace<T>
+>
+```
+
+### Type Parameter
+
+<ParamField path="T" type="DirectAggregateType<K, ID, Namespace>" required>
+  Type definition specifying the key type, ID type, and optional namespace.
+</ParamField>
+
+### DirectAggregateType
+
+```typescript
+type DirectAggregateType<
+  K extends Key,
+  ID extends string,
+  Namespace extends ConvexValue | undefined = undefined,
+> = {
+  Key: K;
+  Id: ID;
+  Namespace?: Namespace;
+}
+```
+
+<ParamField path="Key" type="K extends Key" required>
+  The type of keys used for sorting and querying.
+</ParamField>
+
+<ParamField path="Id" type="ID extends string" required>
+  The type of unique identifiers.
+</ParamField>
+
+<ParamField path="Namespace" type="ConvexValue | undefined" default="undefined">
+  Optional namespace type for multi-tenant data isolation.
+</ParamField>
+
+## Constructor
+
+Inherits from `Aggregate`:
+
+```typescript
+constructor(component: ComponentApi)
+```
+
+<ParamField path="component" type="ComponentApi" required>
+  The Convex Aggregate component API instance.
+</ParamField>
+
+### Example
+
+```typescript
+import { components } from "convex/_generated/api";
+import { DirectAggregate } from "@convex-dev/aggregate";
+
+type MyAggregateType = {
+  Key: number;
+  Id: string;
+};
+
+const aggregate = new DirectAggregate<MyAggregateType>(
+  components.aggregate
+);
+
+// Insert an item
+await aggregate.insert(ctx, {
+  key: 42,
+  id: "item-1",
+  sumValue: 100,
+});
+
+// Query the count
+const count = await aggregate.count(ctx);
+```
+
+## Write Methods
+
+### insert
+
+Insert a new key into the data structure.
+
+```typescript
+async insert(
+  ctx: RunMutationCtx,
+  args: NamespacedArgs<
+    { key: T["Key"]; id: T["Id"]; sumValue?: number },
+    DirectAggregateNamespace<T>
+  >
+): Promise<void>
+```
+
+<ParamField path="ctx" type="RunMutationCtx" required>
+  The Convex mutation context.
+</ParamField>
+
+<ParamField path="args.key" type="T['Key']" required>
+  The key to insert.
+</ParamField>
+
+<ParamField path="args.id" type="T['Id']" required>
+  A unique identifier for this item.
+</ParamField>
+
+<ParamField path="args.sumValue" type="number" default="0">
+  The numeric value to aggregate. Defaults to 0 if not provided.
+</ParamField>
+
+<ParamField path="args.namespace" type="Namespace">
+  The namespace (required if Namespace is not undefined).
+</ParamField>
+
+**Note**: Throws if the `[key, id]` pair already exists. If the tree doesn't exist yet, it will be initialized with default settings.
+
+#### Example
+
+```typescript
+await aggregate.insert(ctx, {
+  key: 100,
+  id: "user-123",
+  sumValue: 50,
+});
+```
+
+[Learn more →](/operations/insert)
+
+### delete
+
+Delete the key with the given ID from the data structure.
+
+```typescript
+async delete(
+  ctx: RunMutationCtx,
+  args: NamespacedArgs<
+    { key: T["Key"]; id: T["Id"] },
+    DirectAggregateNamespace<T>
+  >
+): Promise<void>
+```
+
+<ParamField path="ctx" type="RunMutationCtx" required>
+  The Convex mutation context.
+</ParamField>
+
+<ParamField path="args.key" type="T['Key']" required>
+  The key to delete.
+</ParamField>
+
+<ParamField path="args.id" type="T['Id']" required>
+  The ID of the item to delete.
+</ParamField>
+
+<ParamField path="args.namespace" type="Namespace">
+  The namespace (required if Namespace is not undefined).
+</ParamField>
+
+**Note**: Throws if the given key and ID do not exist.
+
+#### Example
+
+```typescript
+await aggregate.delete(ctx, {
+  key: 100,
+  id: "user-123",
+});
+```
+
+[Learn more →](/operations/delete)
+
+### replace
+
+Update an existing item in the data structure.
+
+```typescript
+async replace(
+  ctx: RunMutationCtx,
+  currentItem: NamespacedArgs<
+    { key: T["Key"]; id: T["Id"] },
+    DirectAggregateNamespace<T>
+  >,
+  newItem: NamespacedArgs<
+    { key: T["Key"]; sumValue?: number },
+    DirectAggregateNamespace<T>
+  >
+): Promise<void>
+```
+
+This is effectively a delete followed by an insert, but performed atomically so it's impossible to view the data structure with the key missing.
+
+<ParamField path="currentItem" type="object" required>
+  The current item to replace.
+</ParamField>
+
+<ParamField path="currentItem.key" type="T['Key']" required>
+  The current key.
+</ParamField>
+
+<ParamField path="currentItem.id" type="T['Id']" required>
+  The ID of the item.
+</ParamField>
+
+<ParamField path="newItem" type="object" required>
+  The new item values.
+</ParamField>
+
+<ParamField path="newItem.key" type="T['Key']" required>
+  The new key.
+</ParamField>
+
+<ParamField path="newItem.sumValue" type="number">
+  The new sumValue.
+</ParamField>
+
+#### Example
+
+```typescript
+await aggregate.replace(
+  ctx,
+  { key: 100, id: "user-123" },
+  { key: 200, sumValue: 75 }
+);
+```
+
+[Learn more →](/operations/replace)
+
+## Idempotent Write Methods
+
+These methods are useful for live backfills where items may or may not already exist.
+
+### insertIfDoesNotExist
+
+Insert an item only if it doesn't already exist.
+
+```typescript
+async insertIfDoesNotExist(
+  ctx: RunMutationCtx,
+  args: NamespacedArgs<
+    { key: T["Key"]; id: T["Id"]; sumValue?: number },
+    DirectAggregateNamespace<T>
+  >
+): Promise<void>
+```
+
+#### Example
+
+```typescript
+await aggregate.insertIfDoesNotExist(ctx, {
+  key: 100,
+  id: "user-123",
+  sumValue: 50,
+});
+```
+
+### deleteIfExists
+
+Delete an item only if it exists.
+
+```typescript
+async deleteIfExists(
+  ctx: RunMutationCtx,
+  args: NamespacedArgs<
+    { key: T["Key"]; id: T["Id"] },
+    DirectAggregateNamespace<T>
+  >
+): Promise<void>
+```
+
+#### Example
+
+```typescript
+await aggregate.deleteIfExists(ctx, {
+  key: 100,
+  id: "user-123",
+});
+```
+
+### replaceOrInsert
+
+Replace an item if it exists, or insert it if it doesn't.
+
+```typescript
+async replaceOrInsert(
+  ctx: RunMutationCtx,
+  currentItem: NamespacedArgs<
+    { key: T["Key"]; id: T["Id"] },
+    DirectAggregateNamespace<T>
+  >,
+  newItem: NamespacedArgs<
+    { key: T["Key"]; sumValue?: number },
+    DirectAggregateNamespace<T>
+  >
+): Promise<void>
+```
+
+#### Example
+
+```typescript
+await aggregate.replaceOrInsert(
+  ctx,
+  { key: 100, id: "user-123" },
+  { key: 200, sumValue: 75 }
+);
+```
+
+## Live Backfill Pattern
+
+Use idempotent methods for safe live backfills:
+
+```typescript
+// 1. Update live writes to use idempotent methods
+await aggregate.insertIfDoesNotExist(ctx, {
+  key: newScore,
+  id: userId,
+  sumValue: 1,
+});
+
+// 2. Run background backfill
+for (const user of existingUsers) {
+  await aggregate.insertIfDoesNotExist(ctx, {
+    key: user.score,
+    id: user.id,
+    sumValue: 1,
+  });
+}
+
+// 3. Switch to non-idempotent methods after backfill
+await aggregate.insert(ctx, { key: score, id: userId, sumValue: 1 });
+
+// 4. Begin using read methods
+const topUsers = await aggregate.paginate(ctx, { pageSize: 10 });
+```
+
+## Inherited Methods
+
+`DirectAggregate` inherits all query methods from [Aggregate](/api/aggregate):
+
+- [count](/api/methods/count) / [countBatch](/api/methods/count-batch)
+- [sum](/api/methods/sum) / [sumBatch](/api/methods/sum-batch)
+- [at](/api/methods/at) / [atBatch](/api/methods/at-batch)
+- [indexOf](/api/methods/index-of)
+- [min](/api/methods/min) / [max](/api/methods/max) / [random](/api/methods/random)
+- [paginate](/api/methods/paginate) / [iter](/api/methods/iter)
+- [clear](/api/methods/clear) / [makeRootLazy](/api/methods/make-root-lazy)
+
+## Related
+
+- [Aggregate](/api/aggregate) - Base class with all query methods
+- [TableAggregate](/api/table-aggregate) - For automatic table synchronization
+- [Insert, Delete, Replace Operations](/operations/overview)

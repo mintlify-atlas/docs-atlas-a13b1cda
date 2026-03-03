@@ -1,0 +1,313 @@
+---
+title: "Aggregate"
+description: "Base class for reading aggregated data from the Convex Aggregate data structure"
+---
+
+## Overview
+
+The `Aggregate` class is the base class that provides read operations for querying aggregated data. It implements a sorted key-value store where you can efficiently query counts, sums, and ranges of items.
+
+The data structure stores:
+1. **Key**: Any Convex value (number, string, array, etc.)
+2. **ID**: A unique string identifier
+3. **SumValue**: An optional number that is aggregated by summing (defaults to 0)
+
+## Class Signature
+
+```typescript
+class Aggregate<
+  K extends Key,
+  ID extends string,
+  Namespace extends ConvexValue | undefined = undefined,
+>
+```
+
+### Type Parameters
+
+<ParamField path="K" type="Key">
+  The type of keys used to sort and query items. Can be any Convex value type.
+</ParamField>
+
+<ParamField path="ID" type="string">
+  The type of unique identifiers for items.
+</ParamField>
+
+<ParamField path="Namespace" type="ConvexValue | undefined" default="undefined">
+  Optional namespace type for multi-tenant data isolation.
+</ParamField>
+
+## Constructor
+
+```typescript
+constructor(component: ComponentApi)
+```
+
+<ParamField path="component" type="ComponentApi" required>
+  The Convex Aggregate component API instance.
+</ParamField>
+
+### Example
+
+```typescript
+import { components } from "convex/_generated/api";
+import { Aggregate } from "@convex-dev/aggregate";
+
+// Create an aggregate instance
+const aggregate = new Aggregate<number, string>(components.aggregate);
+
+// Query count of items
+const count = await aggregate.count(ctx);
+```
+
+## Query Methods
+
+### count
+
+Counts items between the given bounds.
+
+```typescript
+async count(
+  ctx: RunQueryCtx,
+  ...opts: NamespacedOpts<{ bounds?: Bounds<K, ID> }, Namespace>
+): Promise<number>
+```
+
+[Learn more →](/api/methods/count)
+
+### countBatch
+
+Batch version of `count()` - counts items for multiple bounds in a single call.
+
+```typescript
+async countBatch(
+  ctx: RunQueryCtx,
+  queries: NamespacedOptsBatch<{ bounds?: Bounds<K, ID> }, Namespace>
+): Promise<number[]>
+```
+
+[Learn more →](/api/methods/count-batch)
+
+### sum
+
+Adds up the sumValue of items between the given bounds.
+
+```typescript
+async sum(
+  ctx: RunQueryCtx,
+  ...opts: NamespacedOpts<{ bounds?: Bounds<K, ID> }, Namespace>
+): Promise<number>
+```
+
+[Learn more →](/api/methods/sum)
+
+### sumBatch
+
+Batch version of `sum()` - sums items for multiple bounds in a single call.
+
+```typescript
+async sumBatch(
+  ctx: RunQueryCtx,
+  queries: NamespacedOptsBatch<{ bounds?: Bounds<K, ID> }, Namespace>
+): Promise<number[]>
+```
+
+[Learn more →](/api/methods/sum-batch)
+
+### at
+
+Returns the item at the given offset/index/rank in the order of key.
+
+```typescript
+async at(
+  ctx: RunQueryCtx,
+  offset: number,
+  ...opts: NamespacedOpts<{ bounds?: Bounds<K, ID> }, Namespace>
+): Promise<Item<K, ID>>
+```
+
+[Learn more →](/api/methods/at)
+
+### atBatch
+
+Batch version of `at()` - returns items at multiple offsets in a single call.
+
+```typescript
+async atBatch(
+  ctx: RunQueryCtx,
+  queries: NamespacedOptsBatch<
+    { offset: number; bounds?: Bounds<K, ID> },
+    Namespace
+  >
+): Promise<Item<K, ID>[]>
+```
+
+[Learn more →](/api/methods/at-batch)
+
+### indexOf
+
+Returns the rank/offset/index of the given key, within the bounds.
+
+```typescript
+async indexOf(
+  ctx: RunQueryCtx,
+  key: K,
+  ...opts: NamespacedOpts<
+    { id?: ID; bounds?: Bounds<K, ID>; order?: "asc" | "desc" },
+    Namespace
+  >
+): Promise<number>
+```
+
+[Learn more →](/api/methods/index-of)
+
+### min
+
+Gets the minimum item within the given bounds.
+
+```typescript
+async min(
+  ctx: RunQueryCtx,
+  ...opts: NamespacedOpts<{ bounds?: Bounds<K, ID> }, Namespace>
+): Promise<Item<K, ID> | null>
+```
+
+[Learn more →](/api/methods/min)
+
+### max
+
+Gets the maximum item within the given bounds.
+
+```typescript
+async max(
+  ctx: RunQueryCtx,
+  ...opts: NamespacedOpts<{ bounds?: Bounds<K, ID> }, Namespace>
+): Promise<Item<K, ID> | null>
+```
+
+[Learn more →](/api/methods/max)
+
+### random
+
+Gets a uniformly random item within the given bounds.
+
+```typescript
+async random(
+  ctx: RunQueryCtx,
+  ...opts: NamespacedOpts<{ bounds?: Bounds<K, ID> }, Namespace>
+): Promise<Item<K, ID> | null>
+```
+
+[Learn more →](/api/methods/random)
+
+### paginate
+
+Get a page of items between the given bounds, with a cursor to paginate.
+
+```typescript
+async paginate(
+  ctx: RunQueryCtx,
+  ...opts: NamespacedOpts<
+    {
+      bounds?: Bounds<K, ID>;
+      cursor?: string;
+      order?: "asc" | "desc";
+      pageSize?: number;
+    },
+    Namespace
+  >
+): Promise<{ page: Item<K, ID>[]; cursor: string; isDone: boolean }>
+```
+
+[Learn more →](/api/methods/paginate)
+
+### iter
+
+Async iterator to iterate over all items within the bounds.
+
+```typescript
+async *iter(
+  ctx: RunQueryCtx,
+  ...opts: NamespacedOpts<
+    { bounds?: Bounds<K, ID>; order?: "asc" | "desc"; pageSize?: number },
+    Namespace
+  >
+): AsyncGenerator<Item<K, ID>, void, undefined>
+```
+
+[Learn more →](/api/methods/iter)
+
+## Maintenance Methods
+
+### clear
+
+(Re-)initialize the data structure, removing all items if it exists.
+
+```typescript
+async clear(
+  ctx: RunMutationCtx,
+  ...opts: NamespacedOpts<
+    { maxNodeSize?: number; rootLazy?: boolean },
+    Namespace
+  >
+): Promise<void>
+```
+
+[Learn more →](/api/methods/clear)
+
+### makeRootLazy
+
+Reduces write contention by making the root node lazy.
+
+```typescript
+async makeRootLazy(ctx: RunMutationCtx, namespace: Namespace): Promise<void>
+```
+
+[Learn more →](/api/methods/make-root-lazy)
+
+### paginateNamespaces
+
+Paginate through all namespaces in the data structure.
+
+```typescript
+async paginateNamespaces(
+  ctx: RunQueryCtx,
+  cursor?: string,
+  pageSize: number = 100
+): Promise<{ page: Namespace[]; cursor: string; isDone: boolean }>
+```
+
+### iterNamespaces
+
+Async iterator to iterate over all namespaces.
+
+```typescript
+async *iterNamespaces(
+  ctx: RunQueryCtx,
+  pageSize: number = 100
+): AsyncGenerator<Namespace, void, undefined>
+```
+
+### clearAll
+
+Clears all namespaces in the data structure.
+
+```typescript
+async clearAll(
+  ctx: RunMutationCtx & RunQueryCtx,
+  opts?: { maxNodeSize?: number; rootLazy?: boolean }
+): Promise<void>
+```
+
+### makeAllRootsLazy
+
+Makes all namespace roots lazy to reduce write contention.
+
+```typescript
+async makeAllRootsLazy(ctx: RunMutationCtx & RunQueryCtx): Promise<void>
+```
+
+## Related
+
+- [DirectAggregate](/api/direct-aggregate) - For direct insertion and deletion of items
+- [TableAggregate](/api/table-aggregate) - For automatic synchronization with Convex tables
+- [Query Methods](/api/methods/overview) - Detailed documentation for all query methods

@@ -1,0 +1,409 @@
+---
+title: "Offset-Based Pagination"
+description: "Implement page-based navigation with efficient random access to any page"
+---
+
+Offset-based pagination lets users navigate to specific pages (e.g., page 1, 2, 3) rather than infinite scrolling. The Aggregate component makes this efficient with O(log(n)) lookups.
+
+## Overview
+
+This example demonstrates a photo gallery with:
+
+- Page-based navigation (e.g., 10 photos per page)
+- Direct jumps to any page number
+- O(log(n)) access to any offset
+- Automatic updates when photos are added/removed
+- Namespacing by album for isolation
+
+## Schema Definition
+
+Define your photos table with an index for efficient queries:
+
+```ts convex/schema.ts
+import { defineSchema, defineTable } from "convex/server";
+import { v } from "convex/values";
+
+export default defineSchema({
+  photos: defineTable({
+    album: v.string(),
+    url: v.string(),
+  }).index("by_album_creation_time", ["album"]),
+});
+```
+
+<Note>
+  The `by_album_creation_time` index allows us to efficiently query photos by album, sorted by creation time.
+</Note>
+
+## Setting Up the Aggregate
+
+Create an aggregate with namespace by album and sorted by creation time:
+
+```ts convex/photos.ts
+import { TableAggregate } from "@convex-dev/aggregate";
+import { components } from "./_generated/api";
+import { DataModel } from "./_generated/dataModel";
+
+export const photos = new TableAggregate<{
+  Namespace: string;      // album name
+  Key: number;            // creation time
+  DataModel: DataModel;
+  TableName: "photos";
+}>(components.photos, {
+  namespace: (doc) => doc.album,
+  sortKey: (doc) => doc._creationTime,
+});
+```
+
+<Tip>
+  Using `namespace` separates each album into its own data structure, preventing interference between albums and improving throughput.
+</Tip>
+
+## Configure the Component
+
+In `convex.config.ts`, install the aggregate:
+
+```ts convex/convex.config.ts
+import { defineApp } from "convex/server";
+import aggregate from "@convex-dev/aggregate/convex.config.js";
+
+const app = defineApp();
+app.use(aggregate, { name: "photos" });
+export default app;
+```
+
+## Automatic Updates with Triggers
+
+Keep the aggregate in sync automatically:
+
+```ts convex/photos.ts
+import { Triggers } from "convex-helpers/server/triggers";
+import {
+  customCtx,
+  customMutation,
+} from "convex-helpers/server/customFunctions";
+import { mutation as rawMutation } from "./_generated/server";
+
+const triggers = new Triggers<DataModel>();
+triggers.register("photos", photos.trigger());
+
+const mutation = customMutation(rawMutation, customCtx(triggers.wrapDB));
+```
+
+## Core Operations
+
+<Steps>
+  <Step title="Add Photos">
+    Insert photos into albums:
+
+    ```ts
+    export const addPhoto = mutation({
+      args: {
+        album: v.string(),
+        url: v.string(),
+      },
+      handler: async (ctx, args) => {
+        return await ctx.db.insert("photos", {
+          album: args.album,
+          url: args.url,
+        });
+      },
+    });
+    ```
+
+    The trigger automatically updates the aggregate!
+  </Step>
+
+  <Step title="Get Photo Count">
+    Count photos in an album:
+
+    ```ts
+    export const photoCount = query({
+      args: { album: v.string() },
+      handler: async (ctx, { album }) => {
+        return await photos.count(ctx, { namespace: album });
+      },
+    });
+    ```
+  </Step>
+
+  <Step title="Paginate Photos">
+    The key feature: jump to any page in O(log(n)) time!
+
+    ```ts
+    export const pageOfPhotos = query({
+      args: {
+        album: v.string(),
+        offset: v.number(),
+        numItems: v.number(),
+      },
+      handler: async (ctx, { offset, numItems, album }) => {
+        // Check if the album has any photos
+        const firstPhoto = await ctx.db
+          .query("photos")
+          .withIndex("by_album_creation_time", (q) => 
+            q.eq("album", album)
+          )
+          .first();
+        if (!firstPhoto) return [];
+
+        // This is the magic! O(log(n)) lookup to any position
+        const { key: firstPhotoCreationTime } = await photos.at(
+          ctx,
+          offset,
+          { namespace: album }
+        );
+
+        // Get photos starting from that position
+        const photoDocs = await ctx.db
+          .query("photos")
+          .withIndex("by_album_creation_time", (q) =>
+            q.eq("album", album)
+             .gte("_creationTime", firstPhotoCreationTime),
+          )
+          .take(numItems);
+
+        return photoDocs.map((doc) => doc.url);
+      },
+    });
+    ```
+  </Step>
+</Steps>
+
+## How It Works
+
+The magic of offset-based pagination:
+
+1. **Without Aggregates (O(n))**:
+   - To get page 10, you'd need to scan through 100+ photos
+   - Performance degrades as the offset increases
+   - `take(100).slice(90, 100)` fetches too much data
+
+2. **With Aggregates (O(log(n)))**:
+   - `photos.at(ctx, 100)` jumps directly to the 100th photo
+   - Returns the `_creationTime` at that position
+   - Use that time to fetch the page from the index
+   - Constant performance regardless of page number!
+
+## Example: Building a Photo Gallery UI
+
+<Tabs>
+  <Tab title="Page Navigation">
+    ```tsx
+    function PhotoGallery({ album }: { album: string }) {
+      const [currentPage, setCurrentPage] = useState(1);
+      const pageSize = 20;
+      const offset = (currentPage - 1) * pageSize;
+
+      const photoCount = useQuery(api.photos.photoCount, { album });
+      const photos = useQuery(api.photos.pageOfPhotos, {
+        album,
+        offset,
+        numItems: pageSize,
+      });
+
+      const totalPages = photoCount 
+        ? Math.ceil(photoCount / pageSize) 
+        : 0;
+
+      return (
+        <div>
+          <PhotoGrid photos={photos} />
+          <Pagination
+            currentPage={currentPage}
+            totalPages={totalPages}
+            onPageChange={setCurrentPage}
+          />
+        </div>
+      );
+    }
+    ```
+  </Tab>
+
+  <Tab title="Jump to Page">
+    ```tsx
+    function Pagination({ currentPage, totalPages, onPageChange }) {
+      return (
+        <div className="flex gap-2">
+          <button
+            onClick={() => onPageChange(1)}
+            disabled={currentPage === 1}
+          >
+            First
+          </button>
+          
+          <button
+            onClick={() => onPageChange(currentPage - 1)}
+            disabled={currentPage === 1}
+          >
+            Previous
+          </button>
+
+          <span>Page {currentPage} of {totalPages}</span>
+
+          <button
+            onClick={() => onPageChange(currentPage + 1)}
+            disabled={currentPage === totalPages}
+          >
+            Next
+          </button>
+
+          <button
+            onClick={() => onPageChange(totalPages)}
+            disabled={currentPage === totalPages}
+          >
+            Last
+          </button>
+        </div>
+      );
+    }
+    ```
+  </Tab>
+
+  <Tab title="Direct Page Input">
+    ```tsx
+    function JumpToPage({ totalPages, onPageChange }) {
+      const [inputPage, setInputPage] = useState("");
+
+      const handleJump = () => {
+        const pageNum = parseInt(inputPage);
+        if (pageNum >= 1 && pageNum <= totalPages) {
+          onPageChange(pageNum);
+          setInputPage("");
+        }
+      };
+
+      return (
+        <div className="flex gap-2 items-center">
+          <span>Jump to page:</span>
+          <input
+            type="number"
+            min={1}
+            max={totalPages}
+            value={inputPage}
+            onChange={(e) => setInputPage(e.target.value)}
+            className="w-20 px-2 py-1 border rounded"
+          />
+          <button onClick={handleJump}>Go</button>
+        </div>
+      );
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## Get All Albums
+
+List available albums with photo counts:
+
+```ts
+export const availableAlbums = query({
+  handler: async (ctx) => {
+    // Get unique albums
+    const allPhotos = await ctx.db.query("photos").collect();
+    const albumNames = [...new Set(allPhotos.map((photo) => photo.album))];
+
+    // Get count for each album using the aggregate
+    const albumsWithCounts = await Promise.all(
+      albumNames.map(async (album) => ({
+        name: album,
+        count: await photos.count(ctx, { namespace: album }),
+      })),
+    );
+
+    return albumsWithCounts.sort((a, b) => a.name.localeCompare(b.name));
+  },
+});
+```
+
+## Common Patterns
+
+### Calculate Page Metadata
+
+```ts
+export const pageInfo = query({
+  args: {
+    album: v.string(),
+    offset: v.number(),
+    numItems: v.number(),
+  },
+  handler: async (ctx, { album, offset, numItems }) => {
+    const totalCount = await photos.count(ctx, { namespace: album });
+    const currentPage = Math.floor(offset / numItems) + 1;
+    const totalPages = Math.ceil(totalCount / numItems);
+
+    return {
+      currentPage,
+      totalPages,
+      totalCount,
+      hasNextPage: offset + numItems < totalCount,
+      hasPrevPage: offset > 0,
+      startItem: offset + 1,
+      endItem: Math.min(offset + numItems, totalCount),
+    };
+  },
+});
+```
+
+### Handle Empty Albums
+
+```ts
+const firstPhoto = await ctx.db
+  .query("photos")
+  .withIndex("by_album_creation_time", (q) => q.eq("album", album))
+  .first();
+
+if (!firstPhoto) {
+  // Album is empty
+  return [];
+}
+
+// Continue with pagination...
+```
+
+## Performance Characteristics
+
+| Operation | Time Complexity | Description |
+|-----------|----------------|-------------|
+| Jump to page N | O(log(n)) | Direct access to any page |
+| Get photo count | O(log(n)) | Count photos in album |
+| Fetch page | O(log(n) + page size) | Get photos for current page |
+| Add photo | O(log(n)) | Insert and update aggregate |
+
+## When to Use Offset Pagination
+
+<Tabs>
+  <Tab title="Good For">
+    - Search results with page numbers
+    - Photo galleries with fixed pages
+    - Reports with page navigation
+    - Data that doesn't change frequently
+    - UI with "Jump to page" functionality
+  </Tab>
+
+  <Tab title="Consider Cursor Instead">
+    - Real-time feeds (chat, social media)
+    - Frequently updated data
+    - Infinite scroll interfaces
+    - When items are constantly added/removed
+    - Mobile apps with scroll-based loading
+  </Tab>
+</Tabs>
+
+<Note>
+  Convex's native `paginate()` API is great for infinite scroll. Use offset pagination when you need traditional page numbers or random access to pages.
+</Note>
+
+## Reactivity
+
+The aggregate is fully reactive:
+
+- Adding a photo automatically updates the count
+- All pages recalculate instantly
+- No need to invalidate caches or refresh
+- Users see changes in real-time
+
+## Try It Out
+
+See the full working example at:
+https://aggregate-component-example.netlify.app/

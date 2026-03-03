@@ -1,0 +1,158 @@
+---
+title: "insert()"
+description: "Add a new item to the aggregate data structure"
+---
+
+Inserts a new key-value pair into the aggregate data structure. The `insert()` method is available on both `DirectAggregate` and `TableAggregate` classes.
+
+<Warning>
+If the `[key, id]` pair already exists, this method will throw an error. For idempotent inserts, use [`insertIfDoesNotExist()`](/api/idempotent-operations).
+</Warning>
+
+## DirectAggregate.insert()
+
+Insert a new item by providing explicit key and ID values.
+
+### Signature
+
+```typescript
+async insert(
+  ctx: RunMutationCtx,
+  args: NamespacedArgs<
+    { key: K; id: ID; sumValue?: number },
+    Namespace
+  >
+): Promise<void>
+```
+
+### Parameters
+
+<ParamField path="ctx" type="RunMutationCtx" required>
+  The mutation context from a Convex mutation or action.
+</ParamField>
+
+<ParamField path="args" type="object" required>
+  <Expandable title="properties">
+    <ParamField path="key" type="K" required>
+      The sort key for this item. Can be any Convex value (number, string, array, etc.).
+    </ParamField>
+    
+    <ParamField path="id" type="ID" required>
+      A unique string identifier for this item.
+    </ParamField>
+    
+    <ParamField path="sumValue" type="number">
+      Optional numeric value to be aggregated by summing. If not provided, defaults to zero.
+    </ParamField>
+    
+    <ParamField path="namespace" type="Namespace">
+      Optional namespace for isolating aggregates. Required if the aggregate was initialized with a namespace type.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Example
+
+```typescript
+import { DirectAggregate } from "@convex-dev/aggregate";
+import { mutation } from "./_generated/server";
+import { components } from "./_generated/api";
+
+const leaderboard = new DirectAggregate<{
+  Key: number;
+  Id: string;
+}>(components.aggregate);
+
+export const addScore = mutation({
+  args: { playerId: v.string(), score: v.number() },
+  handler: async (ctx, args) => {
+    await leaderboard.insert(ctx, {
+      key: -args.score, // Negative for descending order
+      id: args.playerId,
+      sumValue: args.score,
+    });
+  },
+});
+```
+
+## TableAggregate.insert()
+
+Insert an item computed from a table document. This is typically called automatically via [triggers](/api/triggers).
+
+### Signature
+
+```typescript
+async insert(
+  ctx: RunMutationCtx,
+  doc: DocumentByName<DataModel, TableName>
+): Promise<void>
+```
+
+### Parameters
+
+<ParamField path="ctx" type="RunMutationCtx" required>
+  The mutation context from a Convex mutation or action.
+</ParamField>
+
+<ParamField path="doc" type="DocumentByName" required>
+  The table document to insert. The key and sumValue are computed from this document using the `sortKey` and `sumValue` functions provided during TableAggregate initialization.
+</ParamField>
+
+### Example
+
+```typescript
+import { TableAggregate } from "@convex-dev/aggregate";
+import { mutation } from "./_generated/server";
+import { components } from "./_generated/api";
+import { Triggers } from "convex-helpers/server/triggers";
+
+const leaderboard = new TableAggregate<{
+  Key: number;
+  DataModel: DataModel;
+  TableName: "leaderboard";
+}>(components.aggregate, {
+  sortKey: (doc) => -doc.score,
+  sumValue: (doc) => doc.score,
+});
+
+const triggers = new Triggers<DataModel>();
+triggers.register("leaderboard", leaderboard.trigger());
+
+// The insert is called automatically via the trigger
+export const addScore = mutation({
+  args: { name: v.string(), score: v.number() },
+  handler: async (ctx, args) => {
+    await ctx.db.insert("leaderboard", {
+      name: args.name,
+      score: args.score,
+    });
+    // Aggregate is updated automatically by the trigger
+  },
+});
+```
+
+## Behavior
+
+- If the tree does not exist yet, it will be initialized with the default `maxNodeSize` and `rootLazy=true`
+- The operation is atomic and will be visible immediately to subsequent queries
+- Throws an error if the `[key, id]` pair already exists in the data structure
+
+## Related Methods
+
+<CardGroup cols={2}>
+  <Card title="insertIfDoesNotExist()" icon="shield-check" href="/api/idempotent-operations">
+    Idempotent version that doesn't throw on duplicates
+  </Card>
+  
+  <Card title="replace()" icon="arrow-right-arrow-left" href="/api/replace">
+    Update an existing item
+  </Card>
+  
+  <Card title="delete()" icon="trash" href="/api/delete">
+    Remove an item from the aggregate
+  </Card>
+  
+  <Card title="Triggers" icon="bolt" href="/api/triggers">
+    Automatically sync TableAggregates with database changes
+  </Card>
+</CardGroup>

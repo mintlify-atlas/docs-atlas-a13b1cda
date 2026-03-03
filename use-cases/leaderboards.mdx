@@ -1,0 +1,326 @@
+---
+title: "Leaderboards"
+description: "Build efficient game leaderboards with rankings, scores, and user statistics"
+---
+
+Leaderboards are a perfect use case for the Aggregate component. Track player scores, calculate rankings, and compute user statistics—all in O(log(n)) time.
+
+## Overview
+
+This example demonstrates a game leaderboard that supports:
+
+- Counting total scores
+- Finding scores at specific ranks
+- Calculating user average and high scores
+- Determining rankings for specific scores
+- Efficient pagination through the leaderboard
+
+## Schema Definition
+
+First, define your leaderboard table:
+
+```ts convex/schema.ts
+import { defineSchema, defineTable } from "convex/server";
+import { v } from "convex/values";
+
+export default defineSchema({
+  leaderboard: defineTable({
+    name: v.string(),
+    score: v.number(),
+  }),
+});
+```
+
+## Setting Up Aggregates
+
+Create two aggregates to support different query patterns:
+
+```ts convex/leaderboard.ts
+import { TableAggregate } from "@convex-dev/aggregate";
+import { components } from "./_generated/api";
+import { DataModel } from "./_generated/dataModel";
+
+// Aggregate sorted by score (for global rankings)
+const aggregateByScore = new TableAggregate<{
+  Key: number;
+  DataModel: DataModel;
+  TableName: "leaderboard";
+}>(components.aggregateByScore, {
+  sortKey: (doc) => -doc.score, // Negative for descending order
+});
+
+// Aggregate grouped by user (for per-user statistics)
+const aggregateScoreByUser = new TableAggregate<{
+  Key: [string, number];
+  DataModel: DataModel;
+  TableName: "leaderboard";
+}>(components.aggregateScoreByUser, {
+  sortKey: (doc) => [doc.name, doc.score],
+  sumValue: (doc) => doc.score,
+});
+```
+
+<Note>
+  The `aggregateByScore` uses a negative score (`-doc.score`) to sort in descending order, placing the highest scores first.
+</Note>
+
+## Configure the Component
+
+In `convex.config.ts`, install both aggregate instances:
+
+```ts convex/convex.config.ts
+import { defineApp } from "convex/server";
+import aggregate from "@convex-dev/aggregate/convex.config.js";
+
+const app = defineApp();
+app.use(aggregate, { name: "aggregateByScore" });
+app.use(aggregate, { name: "aggregateScoreByUser" });
+export default app;
+```
+
+## Automatic Updates with Triggers
+
+Use triggers to automatically keep aggregates in sync:
+
+```ts convex/leaderboard.ts
+import { Triggers } from "convex-helpers/server/triggers";
+import { customCtx, customMutation } from "convex-helpers/server/customFunctions";
+import { mutation } from "./_generated/server";
+
+const triggers = new Triggers<DataModel>();
+triggers.register("leaderboard", aggregateByScore.trigger());
+triggers.register("leaderboard", aggregateScoreByUser.trigger());
+
+const mutationWithTriggers = customMutation(
+  mutation,
+  customCtx(triggers.wrapDB),
+);
+```
+
+## Core Operations
+
+<Steps>
+  <Step title="Add Scores">
+    Insert scores into the leaderboard. The triggers automatically update both aggregates:
+
+    ```ts
+    export const addScore = mutationWithTriggers({
+      args: {
+        name: v.string(),
+        score: v.number(),
+      },
+      handler: async (ctx, args) => {
+        const id = await ctx.db.insert("leaderboard", {
+          name: args.name,
+          score: args.score,
+        });
+        return id;
+      },
+    });
+    ```
+  </Step>
+
+  <Step title="Count Total Scores">
+    Get the total number of scores in O(log(n)) time:
+
+    ```ts
+    export const countScores = query({
+      handler: async (ctx) => {
+        return await aggregateByScore.count(ctx);
+      },
+    });
+    ```
+  </Step>
+
+  <Step title="Find Score at Rank">
+    Look up the score at any position in the leaderboard:
+
+    ```ts
+    export const scoreAtRank = query({
+      args: { rank: v.number() },
+      handler: async (ctx, { rank }) => {
+        const score = await aggregateByScore.at(ctx, rank);
+        return await ctx.db.get(score.id);
+      },
+    });
+    ```
+  </Step>
+
+  <Step title="Get Rank of Score">
+    Find where a specific score ranks:
+
+    ```ts
+    export const rankOfScore = query({
+      args: { score: v.number() },
+      handler: async (ctx, { score }) => {
+        // Use negative score to match our sorting
+        return await aggregateByScore.indexOf(ctx, -score);
+      },
+    });
+    ```
+  </Step>
+</Steps>
+
+## User Statistics
+
+Calculate per-user statistics using the `aggregateScoreByUser` aggregate:
+
+<Tabs>
+  <Tab title="Average Score">
+    ```ts
+    export const userAverageScore = query({
+      args: { name: v.string() },
+      handler: async (ctx, { name }) => {
+        const count = await aggregateScoreByUser.count(ctx, {
+          bounds: { prefix: [name] },
+        });
+        if (!count) return null;
+        
+        const sum = await aggregateScoreByUser.sum(ctx, {
+          bounds: { prefix: [name] },
+        });
+        return sum / count;
+      },
+    });
+    ```
+  </Tab>
+
+  <Tab title="High Score">
+    ```ts
+    export const userHighScore = query({
+      args: { name: v.string() },
+      handler: async (ctx, { name }) => {
+        const item = await aggregateScoreByUser.max(ctx, {
+          bounds: { prefix: [name] },
+        });
+        if (!item) return null;
+        return item.sumValue;
+      },
+    });
+    ```
+  </Tab>
+</Tabs>
+
+## Paginated Leaderboard
+
+Display the leaderboard in pages:
+
+```ts
+export const pageOfScores = query({
+  args: {
+    offset: v.number(),
+    numItems: v.number(),
+  },
+  handler: async (ctx, { offset, numItems }) => {
+    // Jump to the offset position in O(log(n)) time
+    const firstInPage = await aggregateByScore.at(ctx, offset);
+
+    // Get the page of results
+    const page = await aggregateByScore.paginate(ctx, {
+      bounds: {
+        lower: {
+          key: firstInPage.key,
+          id: firstInPage.id,
+          inclusive: true,
+        },
+      },
+      pageSize: numItems,
+    });
+
+    // Fetch the actual documents
+    const scores = await Promise.all(
+      page.page.map((doc) => ctx.db.get(doc.id)),
+    );
+
+    return scores.filter((d) => d != null);
+  },
+});
+```
+
+## Backfilling Existing Data
+
+If you're adding aggregates to an existing leaderboard:
+
+```ts
+import { Migrations } from "@convex-dev/migrations";
+import { components, internal } from "./_generated/api";
+
+export const migrations = new Migrations<DataModel>(components.migrations);
+export const run = migrations.runner();
+
+export const backfillAggregatesMigration = migrations.define({
+  table: "leaderboard",
+  migrateOne: async (ctx, doc) => {
+    await aggregateByScore.insertIfDoesNotExist(ctx, doc);
+    await aggregateScoreByUser.insertIfDoesNotExist(ctx, doc);
+  },
+});
+
+export const runAggregateBackfill = migrations.runner(
+  internal.leaderboard.backfillAggregatesMigration,
+);
+```
+
+Run the backfill from the Convex dashboard or CLI:
+
+```bash
+npx convex run leaderboard:runAggregateBackfill
+```
+
+## Example Queries
+
+<Tabs>
+  <Tab title="Top 10 Scores">
+    ```ts
+    // Get the top 10 scores
+    await pageOfScores(ctx, { offset: 0, numItems: 10 });
+    ```
+  </Tab>
+
+  <Tab title="Player Rank">
+    ```ts
+    // Find out where a score of 1000 ranks
+    const rank = await rankOfScore(ctx, { score: 1000 });
+    // Returns the position (0-indexed)
+    ```
+  </Tab>
+
+  <Tab title="P95 Score">
+    ```ts
+    // Find the 95th percentile score
+    const totalCount = await aggregateByScore.count(ctx);
+    const p95Index = Math.floor(totalCount * 0.95);
+    const p95Score = await aggregateByScore.at(ctx, p95Index);
+    ```
+  </Tab>
+
+  <Tab title="User Stats">
+    ```ts
+    // Get all statistics for a user
+    const avgScore = await userAverageScore(ctx, { name: "Jamie" });
+    const highScore = await userHighScore(ctx, { name: "Jamie" });
+    const gamesPlayed = await aggregateScoreByUser.count(ctx, {
+      bounds: { prefix: ["Jamie"] },
+    });
+    ```
+  </Tab>
+</Tabs>
+
+## Performance Characteristics
+
+| Operation | Complexity | Description |
+|-----------|------------|-------------|
+| Count total scores | O(log(n)) | Fast count across all scores |
+| Find score at rank | O(log(n)) | Jump to any position instantly |
+| Get user average | O(log(n)) | Sum and count for a user |
+| Find rank of score | O(log(n)) | Determine position in leaderboard |
+| Paginate results | O(log(n) + page size) | Efficient pagination |
+
+<Note>
+  All operations are O(log(n)) instead of the O(n) that would result from scanning the entire table.
+</Note>
+
+## Try It Out
+
+See the full working example at:
+https://aggregate-component-example.netlify.app/

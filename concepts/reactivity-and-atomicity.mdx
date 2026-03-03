@@ -1,0 +1,335 @@
+---
+title: "Reactivity and Atomicity"
+description: "Understand how aggregates maintain consistency and automatically update in real-time"
+---
+
+## Overview
+
+Like all Convex queries, aggregates are [reactive](https://docs.convex.dev/tutorial/reactor#realtime-is-all-the-time) and updating them is transactional. This means your UI automatically stays in sync with your data, and you never observe inconsistent states.
+
+## Reactivity
+
+Reactivity means if you query an aggregate, like a count, sum, rank, or offset-based page, your UI will **automatically update** to reflect changes.
+
+If someone gets a new high score, everyone else's leaderboard will show them moving down, and the total count of scores will increase. If you add a new song, it will automatically get shuffled into the music album.
+
+<Info>
+**No polling. No refresh.** As soon as data is updated, the aggregates are updated everywhere, including the user's UI.
+</Info>
+
+### Example: Live Leaderboard
+
+```ts
+export const scoreAtRank = query({
+  args: { rank: v.number() },
+  handler: async (ctx, { rank }) => {
+    const score = await aggregateByScore.at(ctx, rank);
+    return await ctx.db.get(score.id);
+  },
+});
+```
+
+When any mutation inserts, updates, or deletes a score:
+1. The aggregate is updated immediately
+2. Any query reading from the aggregate reruns
+3. The UI receives the new results automatically
+4. The leaderboard updates in real-time for all users
+
+### When Queries Rerun
+
+A query reruns when its read dependencies change:
+
+```ts
+// This query depends on ALL scores
+const totalCount = await aggregate.count(ctx);
+// Reruns whenever ANY score is added/removed/updated
+
+// This query depends only on scores > 95
+const topScores = await aggregate.count(ctx, {
+  bounds: { lower: { key: 95, inclusive: false } },
+});
+// Only reruns when scores > 95 change
+
+// This query depends only on Alice's scores
+const aliceScores = await aggregate.count(ctx, {
+  bounds: { prefix: ["alice"] },
+});
+// Only reruns when Alice's scores change
+```
+
+<Tip>
+Use `bounds` to narrow your query's read dependency footprint, reducing unnecessary reruns.
+</Tip>
+
+## Atomicity
+
+Atomicity means if you do multiple writes in the same mutation, those operations are performed together. No query or mutation can observe a race condition where the data exists in the table but not in the aggregate.
+
+### Transactional Writes
+
+```ts
+export const addScore = mutation({
+  args: { name: v.string(), score: v.number() },
+  handler: async (ctx, args) => {
+    // These operations happen atomically
+    const id = await ctx.db.insert("leaderboard", {
+      name: args.name,
+      score: args.score,
+    });
+    const doc = await ctx.db.get(id);
+    await aggregate.insert(ctx, doc!);
+    
+    // At no point can a query see the document without the aggregate
+    return id;
+  },
+});
+```
+
+If two mutations insert data into an aggregate simultaneously, the count will go up by two, even if the mutations are running in parallel.
+
+### Component-Level Atomicity
+
+There's a special transactional property of components that is even better than normal Convex guarantees.
+
+With normal Convex mutations, TypeScript can run with various orderings:
+
+```ts
+// ❌ INCORRECT: Don't do this
+async function increment(ctx: MutationCtx) {
+  const doc = (await ctx.db.query("count").unique())!;
+  await ctx.db.patch(doc._id, { value: doc.value + 1 });
+}
+
+export const addTwo = mutation({
+  handler: async (ctx) => {
+    // Both queries run before both patches!
+    await Promise.all([increment(ctx), increment(ctx)]);
+    // Result: Count increases by 1, not 2
+  },
+});
+```
+
+But with the Aggregate component, the count goes up by two as intended:
+
+```ts
+// ✅ CORRECT: Component operations are atomic
+export const addTwo = mutation({
+  handler: async (ctx) => {
+    await Promise.all([
+      aggregate.insert(ctx, { key: "some key", id: "a" }),
+      aggregate.insert(ctx, { key: "other key", id: "b" }),
+    ]);
+    // Count increases by 2 as expected
+  },
+});
+```
+
+Component operations are atomic within themselves, even when called in parallel.
+
+## Optimistic Concurrency Control (OCC)
+
+Convex uses [Optimistic Concurrency Control](https://docs.convex.dev/database/advanced/occ) to ensure transactions are isolated. When mutations have overlapping read/write dependencies, they may experience OCC conflicts.
+
+### How OCC Works
+
+1. Mutation starts and reads data
+2. Mutation computes new values
+3. Mutation attempts to commit writes
+4. If no conflicting mutations committed in the meantime, commit succeeds
+5. If there was a conflict, the mutation retries automatically
+
+### Read Dependencies and Write Contention
+
+When a **mutation** calls an aggregate method, it creates read dependencies that can conflict with other mutations:
+
+```ts
+// This mutation reads the entire aggregate
+const count = await aggregate.count(ctx);
+// Conflicts with any mutation that inserts/deletes/replaces
+```
+
+Data points with nearby keys may share internal B-tree nodes:
+
+```ts
+// Key: [username, score]
+// Users "Laura" and "Lauren" have adjacent keys
+
+// When Lauren gets a new score, Laura's queries may rerun
+// When both get new scores simultaneously, their mutations may conflict
+```
+
+<Warning>
+With `Key: _creationTime`, each new data point is added to the same part of the B-tree (the end). Therefore, all inserts wait for each other and no mutations can run in parallel.
+</Warning>
+
+## Reducing Contention
+
+### 1. Use Bounds
+
+Partition your aggregate space with bounds:
+
+```ts
+// Only reads scores between 95 and 100
+await aggregate.count(ctx, {
+  bounds: {
+    lower: { key: 95, inclusive: false },
+    upper: { key: 100, inclusive: true },
+  },
+});
+// Only conflicts with mutations modifying scores in this range
+```
+
+### 2. Use Namespaces
+
+Namespaces provide complete isolation:
+
+```ts
+// Only reads Alice's data
+await aggregate.count(ctx, { namespace: "alice" });
+// Never conflicts with Bob's mutations
+```
+
+Each namespace has its own B-tree with no shared internal nodes.
+
+### 3. Adjust maxNodeSize
+
+By default, the B-tree has `maxNodeSize: 16`. This means each write updates a node that accumulates 1/16th of the data structure.
+
+Increase `maxNodeSize` to reduce contention:
+
+```ts
+// Clear and reinitialize with larger node size
+await aggregate.clear(ctx, { maxNodeSize: 64 });
+// Now each write only affects 1/64th of other writes
+```
+
+<Note>
+Larger `maxNodeSize` reduces write contention but increases read latency, as each node contains more data.
+</Note>
+
+### 4. Lazy Root Node
+
+By default, the root node is lazy (doesn't store aggregates). This means `aggregate.count(ctx)` reads several documents instead of one, but inserts at very different keys don't conflict.
+
+If you want to maximize query speed without worrying about conflicts:
+
+```ts
+await aggregate.clear(ctx, { rootLazy: false });
+```
+
+But beware: with `rootLazy: false`, **every write touches the root node**, causing all writes to contend with each other.
+
+<Tip>
+For read-heavy workloads with infrequent writes, use `rootLazy: false`. For write-heavy workloads, keep the default `rootLazy: true`.
+</Tip>
+
+### 5. Use Prefix Bounds
+
+For grouped data, query specific groups:
+
+```ts
+// Only reads data for username "alice"
+await aggregateScoreByUser.count(ctx, {
+  bounds: { prefix: ["alice"] },
+});
+// Only reruns or conflicts when Alice's data changes
+```
+
+## Reactivity Implications
+
+If aggregated data updates frequently, reactivity can cause issues:
+
+**High query rerun rate:**
+- More function calls
+- More bandwidth usage
+- Higher Convex costs
+
+**Solution:** Use bounds to narrow read dependencies
+
+**High mutation conflict rate:**
+- Slower mutations (due to retries)
+- Potential OCC errors if conflicts persist
+
+**Solution:** Use namespaces or increase `maxNodeSize`
+
+## Best Practices
+
+### For Queries
+
+1. **Use bounds** to limit read dependencies
+2. **Query specific namespaces** when possible
+3. **Avoid unbounded reads** in frequently-updated aggregates
+
+### For Mutations
+
+1. **Use namespaces** for independent data partitions
+2. **Write to specific bounds** when possible
+3. **Avoid wide-ranging operations** during high-write periods
+4. **Consider larger maxNodeSize** for high-throughput workloads
+
+### For High-Write Workloads
+
+1. **Use namespaces** to completely isolate partitions
+2. **Avoid time-based keys** like `_creationTime`
+3. **Increase maxNodeSize** to 64 or higher
+4. **Keep rootLazy: true** (the default)
+
+### For Read-Heavy Workloads
+
+1. **Set rootLazy: false** for faster queries
+2. **Use smaller maxNodeSize** for faster reads
+3. **Don't worry about** write contention
+
+## Example: Optimized Leaderboard
+
+```ts
+// Separate aggregates for different query patterns
+
+// Global leaderboard - read-heavy
+const aggregateByScore = new TableAggregate<{
+  Key: number;
+  DataModel: DataModel;
+  TableName: "leaderboard";
+}>(components.aggregateByScore, {
+  sortKey: (doc) => -doc.score,
+});
+
+// Per-user stats - write-heavy
+const aggregateScoreByUser = new TableAggregate<{
+  Namespace: string;  // Isolates users from each other
+  Key: number;
+  DataModel: DataModel;
+  TableName: "leaderboard";
+}>(components.aggregateScoreByUser, {
+  namespace: (doc) => doc.username,
+  sortKey: (doc) => doc.score,
+  sumValue: (doc) => doc.score,
+});
+
+// Global query with bounds
+export const topScores = query({
+  handler: async (ctx) => {
+    // Only depends on top 100 scores
+    const items = await aggregateByScore.paginate(ctx, {
+      pageSize: 100,
+    });
+    return items.page;
+  },
+});
+
+// Per-user query with namespace
+export const userAverage = query({
+  args: { username: v.string() },
+  handler: async (ctx, { username }) => {
+    // Isolated to single user
+    const sum = await aggregateScoreByUser.sum(ctx, { namespace: username });
+    const count = await aggregateScoreByUser.count(ctx, { namespace: username });
+    return count ? sum / count : null;
+  },
+});
+```
+
+This design:
+- Minimizes read dependencies with bounds
+- Isolates writes with namespaces
+- Optimizes for both read and write patterns

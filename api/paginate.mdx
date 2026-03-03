@@ -1,0 +1,375 @@
+---
+title: 'paginate() and iter()'
+description: 'Paginate through items or iterate over all items'
+---
+
+## paginate()
+
+Get a page of items between the given bounds, with a cursor to paginate through results.
+
+### Signature
+
+```typescript
+async paginate(
+  ctx: RunQueryCtx,
+  ...opts: NamespacedOpts<
+    {
+      bounds?: Bounds<K, ID>;
+      cursor?: string;
+      order?: "asc" | "desc";
+      pageSize?: number;
+    },
+    Namespace
+  >
+): Promise<{ page: Item<K, ID>[]; cursor: string; isDone: boolean }>
+```
+
+### Parameters
+
+<ParamField path="ctx" type="RunQueryCtx" required>
+  Query context with `runQuery` method (e.g., from a Convex query or action)
+</ParamField>
+
+<ParamField path="opts" type="object">
+  Optional configuration object
+  
+  <Expandable title="properties">
+    <ParamField path="bounds" type="Bounds<K, ID>">
+      Key range to paginate within. If not provided, paginates all items.
+      
+      <Expandable title="bounds properties">
+        <ParamField path="lower" type="Bound<K, ID>">
+          Lower bound with `key`, optional `id`, and `inclusive` flag
+        </ParamField>
+        
+        <ParamField path="upper" type="Bound<K, ID>">
+          Upper bound with `key`, optional `id`, and `inclusive` flag
+        </ParamField>
+        
+        <ParamField path="prefix" type="K">
+          Prefix to match (alternative to specifying lower/upper bounds)
+        </ParamField>
+      </Expandable>
+    </ParamField>
+    
+    <ParamField path="cursor" type="string">
+      Cursor from a previous `paginate()` call to continue pagination
+    </ParamField>
+    
+    <ParamField path="order" type="'asc' | 'desc'" default="'asc'">
+      Sort order:
+      - `"asc"`: Ascending order (smallest key first)
+      - `"desc"`: Descending order (largest key first)
+    </ParamField>
+    
+    <ParamField path="pageSize" type="number" default="100">
+      Number of items to return per page (max 100)
+    </ParamField>
+    
+    <ParamField path="namespace" type="Namespace">
+      Namespace to query within (if using namespaced aggregates)
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Returns
+
+<ResponseField name="result" type="object">
+  Pagination result object
+  
+  <Expandable title="properties">
+    <ResponseField name="page" type="Item<K, ID>[]">
+      Array of items in this page
+      
+      <Expandable title="Item properties">
+        <ResponseField name="key" type="K">
+          The sort key of the item
+        </ResponseField>
+        
+        <ResponseField name="id" type="ID">
+          The unique identifier of the item
+        </ResponseField>
+        
+        <ResponseField name="sumValue" type="number">
+          The sum value associated with this item
+        </ResponseField>
+      </Expandable>
+    </ResponseField>
+    
+    <ResponseField name="cursor" type="string">
+      Cursor to use for fetching the next page
+    </ResponseField>
+    
+    <ResponseField name="isDone" type="boolean">
+      `true` if this is the last page, `false` if more items remain
+    </ResponseField>
+  </Expandable>
+</ResponseField>
+
+### Examples
+
+<Tabs>
+  <Tab title="Basic Pagination">
+    ```typescript
+    export const listScores = query({
+      args: {
+        cursor: v.optional(v.string()),
+      },
+      handler: async (ctx, { cursor }) => {
+        const result = await aggregateByScore.paginate(ctx, {
+          cursor,
+          pageSize: 20,
+          order: "desc",
+        });
+        
+        // Fetch full documents for each item
+        const scores = await Promise.all(
+          result.page.map((item) => ctx.db.get(item.id)),
+        );
+        
+        return {
+          scores: scores.filter((d) => d != null),
+          cursor: result.cursor,
+          isDone: result.isDone,
+        };
+      },
+    });
+    ```
+  </Tab>
+  
+  <Tab title="Page of Scores">
+    ```typescript
+    export const pageOfScores = query({
+      args: {
+        offset: v.number(),
+        numItems: v.number(),
+      },
+      handler: async (ctx, { offset, numItems }) => {
+        const firstInPage = await aggregateByScore.at(ctx, offset);
+
+        const page = await aggregateByScore.paginate(ctx, {
+          bounds: {
+            lower: {
+              key: firstInPage.key,
+              id: firstInPage.id,
+              inclusive: true,
+            },
+          },
+          pageSize: numItems,
+        });
+
+        const scores = await Promise.all(
+          page.page.map((doc) => ctx.db.get(doc.id)),
+        );
+
+        return scores.filter((d) => d != null);
+      },
+    });
+    ```
+  </Tab>
+  
+  <Tab title="Filtered Pagination">
+    ```typescript
+    export const highScores = query({
+      args: {
+        minScore: v.number(),
+        cursor: v.optional(v.string()),
+      },
+      handler: async (ctx, { minScore, cursor }) => {
+        return await aggregateByScore.paginate(ctx, {
+          bounds: {
+            upper: { key: -minScore, inclusive: true },
+          },
+          cursor,
+          pageSize: 50,
+        });
+      },
+    });
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## iter()
+
+Asynchronous iterator that yields all items within the bounds, automatically handling pagination behind the scenes.
+
+### Signature
+
+```typescript
+async *iter(
+  ctx: RunQueryCtx,
+  ...opts: NamespacedOpts<
+    { bounds?: Bounds<K, ID>; order?: "asc" | "desc"; pageSize?: number },
+    Namespace
+  >
+): AsyncGenerator<Item<K, ID>, void, undefined>
+```
+
+### Parameters
+
+<ParamField path="ctx" type="RunQueryCtx" required>
+  Query context with `runQuery` method
+</ParamField>
+
+<ParamField path="opts" type="object">
+  Optional configuration object
+  
+  <Expandable title="properties">
+    <ParamField path="bounds" type="Bounds<K, ID>">
+      Key range to iterate within
+    </ParamField>
+    
+    <ParamField path="order" type="'asc' | 'desc'" default="'asc'">
+      Sort order for iteration
+    </ParamField>
+    
+    <ParamField path="pageSize" type="number" default="100">
+      Number of items to fetch per internal page
+    </ParamField>
+    
+    <ParamField path="namespace" type="Namespace">
+      Namespace to query within
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Returns
+
+<ResponseField name="generator" type="AsyncGenerator<Item<K, ID>>">
+  Async generator that yields items one at a time
+</ResponseField>
+
+### Example
+
+```typescript
+/**
+ * Example usage:
+ * for await (const item of aggregate.iter(ctx, bounds)) {
+ *   console.log(item);
+ * }
+ */
+export const processAllScores = internalAction({
+  handler: async (ctx) => {
+    let count = 0;
+    
+    for await (const item of aggregateByScore.iter(ctx)) {
+      const doc = await ctx.runQuery(internal.getScore, {
+        id: item.id,
+      });
+      
+      // Process each score
+      console.log(`Processing score ${doc.score} for ${doc.name}`);
+      count++;
+    }
+    
+    return { processed: count };
+  },
+});
+```
+
+### Implementation Note
+
+The `iter()` method automatically handles pagination internally:
+
+```typescript
+async *iter(
+  ctx: RunQueryCtx,
+  ...opts: NamespacedOpts<
+    { bounds?: Bounds<K, ID>; order?: "asc" | "desc"; pageSize?: number },
+    Namespace
+  >
+): AsyncGenerator<Item<K, ID>, void, undefined> {
+  const order = opts[0]?.order ?? "asc";
+  const pageSize = opts[0]?.pageSize ?? 100;
+  const bounds = opts[0]?.bounds;
+  const namespace = namespaceFromOpts(opts);
+  let isDone = false;
+  let cursor: string | undefined = undefined;
+  while (!isDone) {
+    const {
+      page,
+      cursor: newCursor,
+      isDone: newIsDone,
+    } = await this.paginate(ctx, {
+      namespace,
+      bounds,
+      cursor,
+      order,
+      pageSize,
+    });
+    for (const item of page) {
+      yield item;
+    }
+    isDone = newIsDone;
+    cursor = newCursor;
+  }
+}
+```
+
+### Use Cases
+
+<Tabs>
+  <Tab title="Batch Processing">
+    Process all items in the background:
+    
+    ```typescript
+    export const exportAllScores = internalAction({
+      handler: async (ctx) => {
+        const scores = [];
+        
+        for await (const item of aggregateByScore.iter(ctx, {
+          order: "desc",
+        })) {
+          const doc = await ctx.runQuery(internal.getScore, {
+            id: item.id,
+          });
+          scores.push(doc);
+        }
+        
+        // Export to external service
+        await exportToCSV(scores);
+        
+        return { count: scores.length };
+      },
+    });
+    ```
+  </Tab>
+  
+  <Tab title="User-Specific Iteration">
+    Iterate over a user's items:
+    
+    ```typescript
+    export const getUserStats = internalQuery({
+      args: { name: v.string() },
+      handler: async (ctx, { name }) => {
+        let total = 0;
+        let count = 0;
+        let max = -Infinity;
+        
+        for await (const item of aggregateScoreByUser.iter(ctx, {
+          bounds: { prefix: [name] },
+        })) {
+          total += item.sumValue;
+          count++;
+          max = Math.max(max, item.sumValue);
+        }
+        
+        return {
+          average: count > 0 ? total / count : 0,
+          max: count > 0 ? max : null,
+          count,
+        };
+      },
+    });
+    ```
+  </Tab>
+</Tabs>
+
+### When to Use
+
+- Use `paginate()` when building user-facing features that need cursor-based pagination
+- Use `iter()` for internal operations that need to process all items, like backfills, exports, or analytics
+- `iter()` is more convenient for batch operations as it handles pagination automatically
+- `paginate()` gives you more control over the pagination UX and allows resuming from a cursor

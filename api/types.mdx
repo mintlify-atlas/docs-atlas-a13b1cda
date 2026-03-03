@@ -1,0 +1,313 @@
+---
+title: 'Types'
+description: 'TypeScript type definitions for the Aggregate library'
+---
+
+## Key
+
+The key type used for sorting items in the aggregate data structure.
+
+```typescript
+type Key = 
+  | bigint
+  | boolean
+  | number
+  | string
+  | null
+  | Array<Value>
+```
+
+Keys can be any Convex value, including arrays for composite keys.
+
+### Examples
+
+```typescript
+// Simple numeric key
+type NumericKey = number;
+
+// String key
+type StringKey = string;
+
+// Composite key (name + score)
+type CompositeKey = [string, number];
+
+// Complex nested key
+type NestedKey = [string, [number, string]];
+```
+
+<Note>
+  Array keys enable composite sorting. For example, `["Alice", 100]` allows you to sort first by name, then by score.
+</Note>
+
+---
+
+## Item
+
+Represents a single item in the aggregate data structure.
+
+```typescript
+type Item<K extends Key, ID extends string> = {
+  key: K;
+  id: ID;
+  sumValue: number;
+}
+```
+
+<ParamField path="key" type="K">
+  The sort key for this item
+</ParamField>
+
+<ParamField path="id" type="ID">
+  Unique identifier for this item (typically a Convex document ID)
+</ParamField>
+
+<ParamField path="sumValue" type="number">
+  The numeric value associated with this item for aggregation. If not provided during insertion, defaults to 0.
+</ParamField>
+
+### Example
+
+```typescript
+// Item from a leaderboard
+const leaderboardItem: Item<number, Id<"leaderboard">> = {
+  key: -1500,  // Negative score for descending sort
+  id: "jd7...",  // Document ID
+  sumValue: 1500,  // Original score
+};
+
+// Retrieve items
+const topPlayer = await aggregate.at(ctx, 0);
+console.log(topPlayer.key);       // -1500
+console.log(topPlayer.id);        // "jd7..."
+console.log(topPlayer.sumValue);  // 1500
+```
+
+---
+
+## Bound
+
+Defines a single boundary (lower or upper) for range queries.
+
+```typescript
+type Bound<K extends Key, ID extends string> = {
+  key: K;
+  id?: ID;
+  inclusive: boolean;
+}
+```
+
+<ParamField path="key" type="K" required>
+  The key value for this boundary
+</ParamField>
+
+<ParamField path="id" type="ID">
+  Optional ID for exact item matching. When provided, the bound refers to a specific item rather than just a key.
+</ParamField>
+
+<ParamField path="inclusive" type="boolean" required>
+  Whether the bound includes the specified key/item (`true`) or excludes it (`false`)
+</ParamField>
+
+### Examples
+
+```typescript
+// Include all scores >= 100
+const lowerBound: Bound<number, string> = {
+  key: 100,
+  inclusive: true,
+};
+
+// Exclude scores > 1000
+const upperBound: Bound<number, string> = {
+  key: 1000,
+  inclusive: false,
+};
+
+// Start from specific item (by ID)
+const exactBound: Bound<number, Id<"leaderboard">> = {
+  key: 500,
+  id: "jd7abc123",
+  inclusive: true,
+};
+```
+
+---
+
+## Bounds
+
+Defines a range for querying the aggregate data structure.
+
+```typescript
+type Bounds<K extends Key, ID extends string> =
+  | SideBounds<K, ID>
+  | PrefixBounds<K>
+  | EqualityBounds<K>
+
+type SideBounds<K extends Key, ID extends string> = {
+  lower?: Bound<K, ID>;
+  upper?: Bound<K, ID>;
+}
+
+type PrefixBounds<K extends unknown[]> = {
+  prefix: TuplePrefix<K>;
+}
+
+type EqualityBounds<K extends Key> = {
+  eq: K;
+}
+```
+
+### Side bounds
+
+Specify lower and/or upper boundaries.
+
+```typescript
+// Count scores between 100 and 1000
+const count = await aggregate.count(ctx, {
+  bounds: {
+    lower: { key: 100, inclusive: true },
+    upper: { key: 1000, inclusive: true },
+  },
+});
+
+// All scores >= 500
+const topScores = await aggregate.count(ctx, {
+  bounds: {
+    lower: { key: 500, inclusive: true },
+  },
+});
+
+// All scores < 100
+const lowScores = await aggregate.count(ctx, {
+  bounds: {
+    upper: { key: 100, inclusive: false },
+  },
+});
+```
+
+### Prefix bounds
+
+For composite keys, query items matching a prefix.
+
+```typescript
+// With composite key [name, score]
+const aggregate = new TableAggregate<{
+  Key: [string, number];
+  DataModel: DataModel;
+  TableName: "leaderboard";
+}>(components.aggregate, {
+  sortKey: (doc) => [doc.name, doc.score],
+  sumValue: (doc) => doc.score,
+});
+
+// Get all scores for user "Alice"
+const aliceAverage = await aggregate.sum(ctx, {
+  bounds: { prefix: ["Alice"] },
+}) / await aggregate.count(ctx, {
+  bounds: { prefix: ["Alice"] },
+});
+
+// Get Alice's highest score
+const aliceMax = await aggregate.max(ctx, {
+  bounds: { prefix: ["Alice"] },
+});
+```
+
+<Tip>
+  Prefix bounds are powerful for multi-tenant data or grouping. Use the first element(s) of your composite key as a partition key.
+</Tip>
+
+### Equality bounds
+
+Query items with an exact key match.
+
+```typescript
+// Count all items with key exactly equal to 500
+const count = await aggregate.count(ctx, {
+  bounds: { eq: 500 },
+});
+
+// With composite keys
+const count = await aggregate.count(ctx, {
+  bounds: { eq: ["Alice", 500] },
+});
+```
+
+---
+
+## NamespacedArgs
+
+Helper type for methods that accept optional namespace parameters.
+
+```typescript
+type NamespacedArgs<Args, Namespace> =
+  | (Args & { namespace: Namespace })
+  | (Namespace extends undefined ? Args : never)
+```
+
+This type allows methods to accept arguments with or without a namespace, depending on whether the aggregate is configured with namespaces.
+
+### Without namespaces
+
+```typescript
+const aggregate = new DirectAggregate<{
+  Key: number;
+  Id: string;
+}>(component);
+
+// No namespace required
+await aggregate.insert(ctx, {
+  key: 100,
+  id: "item1",
+  sumValue: 10,
+});
+```
+
+### With namespaces
+
+```typescript
+const aggregate = new DirectAggregate<{
+  Key: number;
+  Id: string;
+  Namespace: string;
+}>(component);
+
+// Namespace is required
+await aggregate.insert(ctx, {
+  key: 100,
+  id: "item1",
+  sumValue: 10,
+  namespace: "tenant-a",
+});
+```
+
+### Example: Multi-tenant leaderboard
+
+```typescript
+const aggregate = new TableAggregate<{
+  Key: number;
+  DataModel: DataModel;
+  TableName: "scores";
+  Namespace: string;  // Tenant ID
+}>(components.aggregate, {
+  sortKey: (doc) => -doc.score,
+  namespace: (doc) => doc.tenantId,
+});
+
+// Query specific tenant's leaderboard
+const tenantRank = await aggregate.indexOf(
+  ctx,
+  -userScore,
+  { namespace: "tenant-a" }
+);
+
+// Count scores for a tenant
+const tenantCount = await aggregate.count(
+  ctx,
+  { namespace: "tenant-a" }
+);
+```
+
+<Note>
+  Namespaces are useful for partitioning data by tenant, user, game session, or any other logical grouping.
+</Note>

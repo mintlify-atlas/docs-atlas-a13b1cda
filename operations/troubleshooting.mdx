@@ -1,0 +1,204 @@
+---
+title: Troubleshooting
+description: Common issues and solutions when working with Convex Aggregate
+---
+
+## Common Issues
+
+### OCC Conflicts
+
+**Symptom**: Mutations fail with OCC (Optimistic Concurrency Control) errors when multiple writes happen simultaneously.
+
+**Cause**: Multiple mutations are trying to update the same part of the aggregate B-tree at the same time.
+
+**Solutions**:
+
+<AccordionGroup>
+  <Accordion title="Use namespaces for isolated data">
+    If your data can be partitioned, use namespaces to isolate each partition in its own tree:
+
+    ```ts
+    const aggregate = new TableAggregate<{
+      Namespace: Id<"games">;
+      Key: number;
+      DataModel: DataModel;
+      TableName: "scores";
+    }>(components.aggregate, {
+      namespace: (doc) => doc.gameId,
+      sortKey: (doc) => doc.score,
+    });
+    ```
+
+    Each namespace has its own internal tree, so writes to different games won't conflict.
+  </Accordion>
+
+  <Accordion title="Use bounds to reduce read dependencies">
+    Instead of reading the entire aggregate, use bounds to limit your read scope:
+
+    ```ts
+    // Only depends on scores between 95 and 100
+    const topScores = await aggregate.count(ctx, {
+      bounds: {
+        lower: { key: 95, inclusive: false },
+        upper: { key: 100, inclusive: true },
+      },
+    });
+    ```
+  </Accordion>
+
+  <Accordion title="Increase maxNodeSize">
+    Larger node sizes reduce tree depth and the number of internal nodes:
+
+    ```ts
+    // Clear and rebuild with larger nodes
+    await aggregate.clear(ctx, { maxNodeSize: 64 });
+    // Then backfill your data
+    ```
+
+    Higher values (32, 64, 128) reduce contention but increase read latency slightly.
+  </Accordion>
+
+  <Accordion title="Use lazy root aggregation">
+    If your root isn't already lazy (default is true), make it lazy to avoid all writes hitting a single node:
+
+    ```ts
+    await aggregate.makeRootLazy(ctx, namespace);
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Queries Rerunning Too Often
+
+**Symptom**: Your frontend is making excessive function calls because queries keep rerunning.
+
+**Cause**: Read dependencies on the aggregate tree are broader than necessary.
+
+**Solutions**:
+
+1. **Use bounds in your queries** to limit the dependency footprint:
+
+```ts
+// Bad: depends on entire aggregate
+const recentCount = await aggregate.count(ctx);
+
+// Better: only depends on items from the last hour
+const hourAgo = Date.now() - 60 * 60 * 1000;
+const recentCount = await aggregate.count(ctx, {
+  bounds: {
+    lower: { key: hourAgo, inclusive: true },
+  },
+});
+```
+
+2. **Use prefix bounds** for grouped data:
+
+```ts
+// Only reruns when this specific user's data changes
+const userCount = await aggregate.count(ctx, {
+  bounds: { prefix: [userId] },
+});
+```
+
+3. **Consider namespacing** if queries should be completely isolated.
+
+### Incorrect Aggregate Results
+
+**Symptom**: The count, sum, or other aggregate values don't match the actual table data.
+
+**Cause**: The aggregate got out of sync with the source table, usually because:
+- A mutation updated the table but not the aggregate
+- Direct writes in the Dashboard bypassed aggregate updates
+- A bug in your update logic
+
+**Solutions**:
+
+See [Repairing Aggregates](/operations/repairing-aggregates) for detailed repair procedures.
+
+### Sequential Key Performance Issues
+
+**Symptom**: All writes are slow and conflict with each other, even with namespaces.
+
+**Cause**: Using sequential keys like `_creationTime` causes all new items to be added to the same part of the tree.
+
+**Solutions**:
+
+1. **Avoid time-based keys for write-heavy workloads**:
+
+```ts
+// Problematic: all new items go to the end
+sortKey: (doc) => doc._creationTime
+
+// Better: random distribution
+sortKey: (doc) => doc._id // IDs are random
+```
+
+2. **Use a hash or randomized key component**:
+
+```ts
+// Distribute writes across the tree
+sortKey: (doc) => [doc.userId, doc._creationTime]
+```
+
+3. **Use time ranges with namespaces**:
+
+```ts
+// Namespace by time bucket instead of sorting by time
+namespace: (doc) => Math.floor(doc._creationTime / (24 * 60 * 60 * 1000)), // Day
+sortKey: (doc) => doc._id
+```
+
+### Memory or Performance Degradation
+
+**Symptom**: Aggregate operations become slower over time or use more memory.
+
+**Cause**: The tree may have grown very large, or `maxNodeSize` is too small for your dataset.
+
+**Solutions**:
+
+1. **Archive old data** by using time-based namespaces and clearing old namespaces:
+
+```ts
+// Clear data older than 90 days
+const ninetyDaysAgo = Date.now() - 90 * 24 * 60 * 60 * 1000;
+await aggregate.clear(ctx, { namespace: ninetyDaysAgo });
+```
+
+2. **Increase maxNodeSize** if you have millions of items:
+
+```ts
+// Rebuild with larger nodes for better performance at scale
+await aggregate.clearAll(ctx, { maxNodeSize: 128 });
+```
+
+3. **Use pagination** instead of loading all items at once:
+
+```ts
+// Bad: loads everything into memory
+const allItems = [];
+for await (const item of aggregate.iter(ctx)) {
+  allItems.push(item);
+}
+
+// Better: process in batches
+let cursor: string | undefined;
+let isDone = false;
+while (!isDone) {
+  const { page, cursor: newCursor, isDone: done } = 
+    await aggregate.paginate(ctx, { cursor, pageSize: 100 });
+  // Process page
+  cursor = newCursor;
+  isDone = done;
+}
+```
+
+## Getting Help
+
+If you're still experiencing issues:
+
+1. Check the [Performance](/performance/optimizing-throughput) section for optimization strategies
+2. Review the [Operations](/operations/repairing-aggregates) guide for data repair procedures
+3. File an issue on [GitHub](https://github.com/get-convex/aggregate/issues) with:
+   - Your aggregate configuration
+   - Sample data patterns
+   - Error messages or symptoms
+   - Performance characteristics (writes/sec, data size, etc.)

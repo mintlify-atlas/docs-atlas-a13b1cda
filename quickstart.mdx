@@ -1,80 +1,230 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Get up and running with Convex Aggregate in minutes
 ---
 
-## Get started in three steps
-
-Get your documentation site running locally and make your first customization.
-
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+This guide walks you through creating a working leaderboard with Convex Aggregate. You'll learn how to configure aggregates, write data, and query aggregated results.
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+This quickstart assumes you've already [installed the Aggregate component](/installation).
 </Note>
+
+## Define Your Schema
+
+First, create a table to store your data. For this example, we'll track game scores:
+
+```ts convex/schema.ts
+import { defineSchema, defineTable } from "convex/server";
+import { v } from "convex/values";
+
+export default defineSchema({
+  leaderboard: defineTable({
+    name: v.string(),
+    score: v.number(),
+  }),
+});
+```
+
+## Configure Your Aggregate
+
+Create a `TableAggregate` to track scores. We'll create two different views:
+1. Sort by score (for global rankings)
+2. Group by user and score (for user statistics)
+
+```ts convex/leaderboard.ts
+import { TableAggregate } from "@convex-dev/aggregate";
+import { components } from "./_generated/api";
+import type { DataModel } from "./_generated/dataModel";
+
+// Aggregate sorted by score (highest first)
+const aggregateByScore = new TableAggregate<{
+  Key: number;
+  DataModel: DataModel;
+  TableName: "leaderboard";
+}>(components.aggregateByScore, {
+  sortKey: (doc) => -doc.score, // Negative for descending order
+});
+
+// Aggregate grouped by user, then score
+const aggregateScoreByUser = new TableAggregate<{
+  Key: [string, number];
+  DataModel: DataModel;
+  TableName: "leaderboard";
+}>(components.aggregateScoreByUser, {
+  sortKey: (doc) => [doc.name, doc.score],
+  sumValue: (doc) => doc.score, // Track sum of scores
+});
+```
+
+## Set Up Automatic Syncing
+
+Use triggers to keep aggregates in sync automatically:
+
+```ts convex/leaderboard.ts
+import { Triggers } from "convex-helpers/server/triggers";
+import { customCtx, customMutation } from "convex-helpers/server/customFunctions";
+import { mutation as rawMutation } from "./_generated/server";
+
+const triggers = new Triggers<DataModel>();
+triggers.register("leaderboard", aggregateByScore.trigger());
+triggers.register("leaderboard", aggregateScoreByUser.trigger());
+
+// Custom mutation that automatically updates aggregates
+export const mutation = customMutation(rawMutation, customCtx(triggers.wrapDB));
+```
+
+## Write Data
+
+Now you can insert scores, and the aggregates will update automatically:
+
+```ts convex/leaderboard.ts
+import { v } from "convex/values";
+
+export const addScore = mutation({
+  args: {
+    name: v.string(),
+    score: v.number(),
+  },
+  handler: async (ctx, args) => {
+    // This automatically updates both aggregates via triggers
+    const id = await ctx.db.insert("leaderboard", {
+      name: args.name,
+      score: args.score,
+    });
+    return id;
+  },
+});
+```
+
+## Query Aggregated Data
+
+Now you can efficiently query your data in O(log n) time:
+
+<Tabs>
+  <Tab title="Total Count">
+    ```ts
+    export const countScores = query({
+      handler: async (ctx) => {
+        return await aggregateByScore.count(ctx);
+      },
+    });
+    ```
+  </Tab>
+
+  <Tab title="Score at Rank">
+    ```ts
+    export const scoreAtRank = query({
+      args: { rank: v.number() },
+      handler: async (ctx, { rank }) => {
+        const item = await aggregateByScore.at(ctx, rank);
+        return await ctx.db.get(item.id);
+      },
+    });
+    ```
+  </Tab>
+
+  <Tab title="Rank of Score">
+    ```ts
+    export const rankOfScore = query({
+      args: { score: v.number() },
+      handler: async (ctx, { score }) => {
+        // Use negative score since we sorted descending
+        return await aggregateByScore.indexOf(ctx, -score);
+      },
+    });
+    ```
+  </Tab>
+
+  <Tab title="Top 10 Scores">
+    ```ts
+    export const topScores = query({
+      args: { limit: v.number() },
+      handler: async (ctx, { limit }) => {
+        const { page } = await aggregateByScore.paginate(ctx, {
+          pageSize: limit,
+          order: "asc", // First items in our negated sort
+        });
+        
+        return await Promise.all(
+          page.map((item) => ctx.db.get(item.id))
+        );
+      },
+    });
+    ```
+  </Tab>
+</Tabs>
+
+## User-Specific Statistics
+
+Use the second aggregate to efficiently compute per-user statistics:
+
+```ts
+export const userAverageScore = query({
+  args: { name: v.string() },
+  handler: async (ctx, { name }) => {
+    const count = await aggregateScoreByUser.count(ctx, {
+      bounds: { prefix: [name] },
+    });
+    
+    if (count === 0) return null;
+    
+    const sum = await aggregateScoreByUser.sum(ctx, {
+      bounds: { prefix: [name] },
+    });
+    
+    return sum / count;
+  },
+});
+
+export const userHighScore = query({
+  args: { name: v.string() },
+  handler: async (ctx, { name }) => {
+    const item = await aggregateScoreByUser.max(ctx, {
+      bounds: { prefix: [name] },
+    });
+    
+    return item?.sumValue ?? null;
+  },
+});
+```
+
+## Try It Out
+
+Add some test data from the Convex Dashboard:
+
+```ts
+// Run these from the Dashboard
+await addScore({ name: "Alice", score: 1000 });
+await addScore({ name: "Bob", score: 1500 });
+await addScore({ name: "Alice", score: 1200 });
+
+// Then query:
+await countScores(); // Returns 3
+await userAverageScore({ name: "Alice" }); // Returns 1100
+await userHighScore({ name: "Bob" }); // Returns 1500
+await rankOfScore({ score: 1200 }); // Returns Alice's rank
+```
+
+## Backfilling Existing Data
+
+If you're adding aggregates to an existing table with data, see the [Migrations and Backfills](/guides/migrations-and-backfills) guide for instructions on backfilling existing records.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Core Concepts" icon="book" href="/concepts/what-are-aggregates">
+    Learn about keys, sorting, grouping, and namespacing
+  </Card>
+  
+  <Card title="Use Cases" icon="lightbulb" href="/use-cases/leaderboards">
+    Explore real-world examples like leaderboards and pagination
+  </Card>
+  
+  <Card title="API Reference" icon="code" href="/api/aggregate">
+    Browse the complete API documentation
+  </Card>
+  
+  <Card title="Performance" icon="gauge-high" href="/performance/optimizing-throughput">
+    Optimize for high-throughput workloads
+  </Card>
+</CardGroup>

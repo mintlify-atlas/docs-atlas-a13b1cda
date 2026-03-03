@@ -1,0 +1,211 @@
+---
+title: "replace()"
+description: "Atomically update an existing item in the aggregate"
+---
+
+Atomically updates an existing item in the aggregate data structure. This is effectively a delete followed by an insert, but performed atomically so it's impossible to observe the data structure with the key missing.
+
+<Warning>
+The item must exist in the data structure, or this method will throw an error. For idempotent updates, use [`replaceOrInsert()`](/api/idempotent-operations).
+</Warning>
+
+## DirectAggregate.replace()
+
+Replace an item by specifying the current key/ID and the new key/sumValue.
+
+### Signature
+
+```typescript
+async replace(
+  ctx: RunMutationCtx,
+  currentItem: NamespacedArgs<
+    { key: K; id: ID },
+    Namespace
+  >,
+  newItem: NamespacedArgs<
+    { key: K; sumValue?: number },
+    Namespace
+  >
+): Promise<void>
+```
+
+### Parameters
+
+<ParamField path="ctx" type="RunMutationCtx" required>
+  The mutation context from a Convex mutation or action.
+</ParamField>
+
+<ParamField path="currentItem" type="object" required>
+  The current item to replace.
+  <Expandable title="properties">
+    <ParamField path="key" type="K" required>
+      The current sort key of the item.
+    </ParamField>
+    
+    <ParamField path="id" type="ID" required>
+      The unique identifier of the item. This remains the same after the replacement.
+    </ParamField>
+    
+    <ParamField path="namespace" type="Namespace">
+      Optional current namespace. Required if the aggregate was initialized with a namespace type.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField path="newItem" type="object" required>
+  The new values for the item.
+  <Expandable title="properties">
+    <ParamField path="key" type="K" required>
+      The new sort key for the item.
+    </ParamField>
+    
+    <ParamField path="sumValue" type="number">
+      Optional new numeric value to be aggregated. If not provided, defaults to zero.
+    </ParamField>
+    
+    <ParamField path="namespace" type="Namespace">
+      Optional new namespace. Can be different from the current namespace to move the item between namespaces.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Example
+
+```typescript
+import { DirectAggregate } from "@convex-dev/aggregate";
+import { mutation } from "./_generated/server";
+import { components } from "./_generated/api";
+
+const leaderboard = new DirectAggregate<{
+  Key: number;
+  Id: string;
+}>(components.aggregate);
+
+export const updateScore = mutation({
+  args: {
+    playerId: v.string(),
+    oldScore: v.number(),
+    newScore: v.number(),
+  },
+  handler: async (ctx, args) => {
+    await leaderboard.replace(
+      ctx,
+      // Current item
+      {
+        key: -args.oldScore,
+        id: args.playerId,
+      },
+      // New item
+      {
+        key: -args.newScore,
+        sumValue: args.newScore,
+      }
+    );
+  },
+});
+```
+
+## TableAggregate.replace()
+
+Replace an item using old and new table documents. This is typically called automatically via [triggers](/api/triggers).
+
+### Signature
+
+```typescript
+async replace(
+  ctx: RunMutationCtx,
+  oldDoc: DocumentByName<DataModel, TableName>,
+  newDoc: DocumentByName<DataModel, TableName>
+): Promise<void>
+```
+
+### Parameters
+
+<ParamField path="ctx" type="RunMutationCtx" required>
+  The mutation context from a Convex mutation or action.
+</ParamField>
+
+<ParamField path="oldDoc" type="DocumentByName" required>
+  The old table document. The current key is computed from this document.
+</ParamField>
+
+<ParamField path="newDoc" type="DocumentByName" required>
+  The new table document. The new key and sumValue are computed from this document using the `sortKey` and `sumValue` functions.
+</ParamField>
+
+### Example
+
+```typescript
+import { TableAggregate } from "@convex-dev/aggregate";
+import { mutation } from "./_generated/server";
+import { components } from "./_generated/api";
+import { Triggers } from "convex-helpers/server/triggers";
+
+const leaderboard = new TableAggregate<{
+  Key: number;
+  DataModel: DataModel;
+  TableName: "leaderboard";
+}>(components.aggregate, {
+  sortKey: (doc) => -doc.score,
+  sumValue: (doc) => doc.score,
+});
+
+const triggers = new Triggers<DataModel>();
+triggers.register("leaderboard", leaderboard.trigger());
+
+// The replace is called automatically via the trigger
+export const updateScore = mutation({
+  args: {
+    id: v.id("leaderboard"),
+    newScore: v.number(),
+  },
+  handler: async (ctx, args) => {
+    await ctx.db.patch(args.id, { score: args.newScore });
+    // Aggregate is updated automatically by the trigger
+  },
+});
+```
+
+## Behavior
+
+- The operation is atomic - the item is never missing from the data structure
+- The ID remains the same; only the key, sumValue, and/or namespace can change
+- Throws an error if the current `[key, id]` pair does not exist
+- Can move an item between namespaces by specifying different namespaces in currentItem and newItem
+- All aggregate queries remain consistent throughout the operation
+
+## Use Cases
+
+<AccordionGroup>
+  <Accordion title="Updating scores in a leaderboard" icon="trophy">
+    When a player's score changes, use `replace()` to update their position in the leaderboard atomically.
+  </Accordion>
+  
+  <Accordion title="Moving items between categories" icon="arrow-right-arrow-left">
+    Change the namespace of an item to move it from one category to another while maintaining its identity.
+  </Accordion>
+  
+  <Accordion title="Recalculating sort keys" icon="calculator">
+    When the criteria for sorting changes, update the key while keeping the same ID and sumValue.
+  </Accordion>
+</AccordionGroup>
+
+## Related Methods
+
+<CardGroup cols={2}>
+  <Card title="replaceOrInsert()" icon="shield-check" href="/api/idempotent-operations">
+    Idempotent version that inserts if the item doesn't exist
+  </Card>
+  
+  <Card title="insert()" icon="plus" href="/api/insert">
+    Add a new item to the aggregate
+  </Card>
+  
+  <Card title="delete()" icon="trash" href="/api/delete">
+    Remove an item from the aggregate
+  </Card>
+  
+  <Card title="Triggers" icon="bolt" href="/api/triggers">
+    Automatically sync TableAggregates with database changes
+  </Card>
+</CardGroup>

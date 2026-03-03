@@ -1,0 +1,489 @@
+---
+title: "Statistics"
+description: "Calculate statistics on data without storing it in a table"
+---
+
+Collect statistics on events and metrics without needing a database table. Perfect for tracking performance metrics, latencies, and other numerical data with efficient percentile calculations.
+
+## Overview
+
+This example demonstrates statistics collection that supports:
+
+- Collecting numerical data (e.g., API latencies)
+- Calculating mean, median, and percentiles (p75, p95)
+- Finding min and max values
+- All in O(log(n)) time
+- No database table required
+
+## Why Use Direct Aggregate?
+
+Unlike the other examples that aggregate data from a Convex table, statistics often involve:
+
+- **Ephemeral data**: Metrics you don't need to store long-term
+- **High volume**: Too many data points to store individually
+- **Simple structure**: Just keys and values, no need for full documents
+- **Memory efficiency**: Store only the aggregated structure
+
+## Setting Up Direct Aggregate
+
+Use `DirectAggregate` instead of `TableAggregate`:
+
+```ts convex/stats.ts
+import { DirectAggregate } from "@convex-dev/aggregate";
+import { components } from "./_generated/api";
+
+const stats = new DirectAggregate<{
+  Key: number;  // The latency value
+  Id: string;   // Unique identifier (timestamp)
+}>(components.stats);
+```
+
+<Note>
+  The `Id` field is used as a tie-breaker when multiple data points have the same key. Using a timestamp ensures uniqueness.
+</Note>
+
+## Configure the Component
+
+In `convex.config.ts`, install the aggregate:
+
+```ts convex/convex.config.ts
+import { defineApp } from "convex/server";
+import aggregate from "@convex-dev/aggregate/convex.config.js";
+
+const app = defineApp();
+app.use(aggregate, { name: "stats" });
+export default app;
+```
+
+## Core Operations
+
+<Steps>
+  <Step title="Report Metrics">
+    Add data points to collect statistics:
+
+    ```ts
+    import { mutation } from "./_generated/server";
+    import { v } from "convex/values";
+
+    export const reportLatency = mutation({
+      args: { latency: v.number() },
+      handler: async (ctx, { latency }) => {
+        await stats.insert(ctx, {
+          key: latency,
+          id: new Date().toISOString(),
+          sumValue: latency,
+        });
+      },
+    });
+    ```
+
+    <Tip>
+      Including `sumValue` lets you calculate means and totals using `stats.sum()`.
+    </Tip>
+  </Step>
+
+  <Step title="Calculate Statistics">
+    Get comprehensive statistics in a single query:
+
+    ```ts
+    import { query } from "./_generated/server";
+
+    export const getStats = query({
+      handler: async (ctx) => {
+        const count = await stats.count(ctx);
+        if (count === 0) return null;
+
+        // Calculate various statistics
+        const mean = (await stats.sum(ctx)) / count;
+        const median = (await stats.at(ctx, Math.floor(count / 2))).key;
+        const p75 = (await stats.at(ctx, Math.floor(count * 0.75))).key;
+        const p95 = (await stats.at(ctx, Math.floor(count * 0.95))).key;
+        const min = (await stats.min(ctx))!.key;
+        const max = (await stats.max(ctx))!.key;
+
+        return {
+          count,
+          mean,
+          median,
+          p75,
+          p95,
+          min,
+          max,
+        };
+      },
+    });
+    ```
+  </Step>
+
+  <Step title="Clear Statistics">
+    Reset the statistics when needed:
+
+    ```ts
+    export const resetStats = mutation({
+      handler: async (ctx) => {
+        await stats.clear(ctx);
+      },
+    });
+    ```
+  </Step>
+</Steps>
+
+## Understanding Percentiles
+
+Percentiles tell you the value below which a given percentage of observations fall:
+
+- **Median (p50)**: 50% of values are below this
+- **p75**: 75% of values are below this
+- **p95**: 95% of values are below this (commonly used for latency)
+- **p99**: 99% of values are below this (catches outliers)
+
+```ts
+// Calculate any percentile
+function percentile(p: number): number {
+  const count = await stats.count(ctx);
+  const index = Math.floor(count * (p / 100));
+  return (await stats.at(ctx, index)).key;
+}
+
+// Examples:
+const p50 = await percentile(50);  // Median
+const p90 = await percentile(90);  // 90th percentile
+const p99 = await percentile(99);  // 99th percentile
+```
+
+## Example Use Cases
+
+<Tabs>
+  <Tab title="API Latency Monitoring">
+    ```ts
+    // Track API response times
+    export const trackApiCall = mutation({
+      args: {
+        endpoint: v.string(),
+        latencyMs: v.number(),
+      },
+      handler: async (ctx, { endpoint, latencyMs }) => {
+        // You could use namespace for per-endpoint stats
+        await stats.insert(ctx, {
+          key: latencyMs,
+          id: `${endpoint}-${Date.now()}`,
+          sumValue: latencyMs,
+        });
+      },
+    });
+
+    // Get latency statistics
+    export const getLatencyStats = query({
+      handler: async (ctx) => {
+        const count = await stats.count(ctx);
+        if (count === 0) return null;
+
+        const mean = (await stats.sum(ctx)) / count;
+        const p95 = (await stats.at(ctx, Math.floor(count * 0.95))).key;
+        const max = (await stats.max(ctx))!.key;
+
+        return {
+          averageMs: Math.round(mean),
+          p95Ms: Math.round(p95),
+          maxMs: Math.round(max),
+          sampleSize: count,
+        };
+      },
+    });
+    ```
+  </Tab>
+
+  <Tab title="User Engagement Metrics">
+    ```ts
+    // Track session durations
+    export const recordSessionDuration = mutation({
+      args: { durationSeconds: v.number() },
+      handler: async (ctx, { durationSeconds }) => {
+        await sessionStats.insert(ctx, {
+          key: durationSeconds,
+          id: new Date().toISOString(),
+          sumValue: durationSeconds,
+        });
+      },
+    });
+
+    // Analyze engagement
+    export const getEngagementMetrics = query({
+      handler: async (ctx) => {
+        const count = await sessionStats.count(ctx);
+        if (count === 0) return null;
+
+        const totalSeconds = await sessionStats.sum(ctx);
+        const averageMinutes = (totalSeconds / count) / 60;
+        
+        const medianSeconds = (await sessionStats.at(
+          ctx,
+          Math.floor(count / 2)
+        )).key;
+
+        return {
+          totalSessions: count,
+          averageSessionMinutes: Math.round(averageMinutes * 10) / 10,
+          medianSessionMinutes: Math.round((medianSeconds / 60) * 10) / 10,
+        };
+      },
+    });
+    ```
+  </Tab>
+
+  <Tab title="Error Rate Tracking">
+    ```ts
+    // Track success/failure as 0 or 1
+    export const recordRequestResult = mutation({
+      args: { success: v.boolean() },
+      handler: async (ctx, { success }) => {
+        const value = success ? 0 : 1; // 0 = success, 1 = failure
+        await requestStats.insert(ctx, {
+          key: value,
+          id: new Date().toISOString(),
+          sumValue: value,
+        });
+      },
+    });
+
+    // Calculate error rate
+    export const getErrorRate = query({
+      handler: async (ctx) => {
+        const totalRequests = await requestStats.count(ctx);
+        if (totalRequests === 0) return null;
+
+        const totalErrors = await requestStats.sum(ctx);
+        const errorRate = (totalErrors / totalRequests) * 100;
+
+        return {
+          totalRequests,
+          errorCount: totalErrors,
+          errorRatePercent: Math.round(errorRate * 100) / 100,
+        };
+      },
+    });
+    ```
+  </Tab>
+
+  <Tab title="Score Distribution">
+    ```ts
+    // Analyze test score distribution
+    export const recordTestScore = mutation({
+      args: { score: v.number() }, // 0-100
+      handler: async (ctx, { score }) => {
+        await scoreStats.insert(ctx, {
+          key: score,
+          id: new Date().toISOString(),
+          sumValue: score,
+        });
+      },
+    });
+
+    export const getScoreDistribution = query({
+      handler: async (ctx) => {
+        const count = await scoreStats.count(ctx);
+        if (count === 0) return null;
+
+        const mean = (await scoreStats.sum(ctx)) / count;
+        const median = (await scoreStats.at(ctx, Math.floor(count / 2))).key;
+        const min = (await scoreStats.min(ctx))!.key;
+        const max = (await scoreStats.max(ctx))!.key;
+
+        // Calculate grade distribution
+        const aRange = await scoreStats.count(ctx, {
+          bounds: { lower: { key: 90, inclusive: true } },
+        });
+        const bRange = await scoreStats.count(ctx, {
+          bounds: {
+            lower: { key: 80, inclusive: true },
+            upper: { key: 90, inclusive: false },
+          },
+        });
+
+        return {
+          count,
+          mean: Math.round(mean * 10) / 10,
+          median,
+          min,
+          max,
+          gradeDistribution: {
+            aCount: aRange,
+            bCount: bRange,
+          },
+        };
+      },
+    });
+    ```
+  </Tab>
+</Tabs>
+
+## Batch Insertion
+
+Insert multiple data points efficiently:
+
+```ts
+export const addLatencies = mutation({
+  args: { latencies: v.array(v.number()) },
+  handler: async (ctx, { latencies }) => {
+    await Promise.all(
+      latencies.map((latency) =>
+        stats.insert(ctx, {
+          key: latency,
+          id: new Date().toISOString(),
+          sumValue: latency,
+        }),
+      ),
+    );
+  },
+});
+```
+
+## Statistics Dashboard Example
+
+```tsx
+function StatsDashboard() {
+  const stats = useQuery(api.stats.getStats);
+
+  if (!stats) {
+    return <div>No data collected yet</div>;
+  }
+
+  return (
+    <div className="grid grid-cols-2 gap-4">
+      <MetricCard label="Count" value={stats.count} />
+      <MetricCard label="Mean" value={`${stats.mean.toFixed(2)}ms`} />
+      <MetricCard label="Median" value={`${stats.median}ms`} />
+      <MetricCard label="p75" value={`${stats.p75}ms`} />
+      <MetricCard label="p95" value={`${stats.p95}ms`} />
+      <MetricCard label="Max" value={`${stats.max}ms`} />
+      <MetricCard label="Min" value={`${stats.min}ms`} />
+      
+      <div className="col-span-2">
+        <PercentileChart stats={stats} />
+      </div>
+    </div>
+  );
+}
+
+function MetricCard({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div className="p-4 border rounded">
+      <div className="text-sm text-gray-500">{label}</div>
+      <div className="text-2xl font-bold">{value}</div>
+    </div>
+  );
+}
+```
+
+## Bounded Statistics
+
+Calculate statistics for a specific range:
+
+```ts
+// Get statistics for latencies between 100ms and 500ms
+export const getStatsInRange = query({
+  args: {
+    min: v.number(),
+    max: v.number(),
+  },
+  handler: async (ctx, { min, max }) => {
+    const bounds = {
+      lower: { key: min, inclusive: true },
+      upper: { key: max, inclusive: true },
+    };
+
+    const count = await stats.count(ctx, { bounds });
+    if (count === 0) return null;
+
+    const sum = await stats.sum(ctx, { bounds });
+    const mean = sum / count;
+
+    return {
+      count,
+      mean,
+      range: [min, max],
+    };
+  },
+});
+```
+
+## Time-Based Statistics with Namespaces
+
+Use namespaces to separate statistics by time period:
+
+```ts
+const dailyStats = new DirectAggregate<{
+  Namespace: string;  // Date string: "2024-01-15"
+  Key: number;
+  Id: string;
+}>(components.dailyStats);
+
+export const reportDailyMetric = mutation({
+  args: { value: v.number() },
+  handler: async (ctx, { value }) => {
+    const today = new Date().toISOString().split('T')[0]!;
+    
+    await dailyStats.insert(ctx, {
+      key: value,
+      id: new Date().toISOString(),
+      sumValue: value,
+    }, { namespace: today });
+  },
+});
+
+export const getDailyStats = query({
+  args: { date: v.string() },
+  handler: async (ctx, { date }) => {
+    const count = await dailyStats.count(ctx, { namespace: date });
+    if (count === 0) return null;
+
+    const sum = await dailyStats.sum(ctx, { namespace: date });
+    const mean = sum / count;
+
+    return { date, count, mean };
+  },
+});
+```
+
+## Performance Characteristics
+
+| Operation | Time Complexity | Description |
+|-----------|----------------|-------------|
+| Insert value | O(log(n)) | Add a data point |
+| Count | O(log(n)) | Total number of points |
+| Sum | O(log(n)) | Sum of all values |
+| Min/Max | O(log(n)) | Extrema values |
+| Percentile | O(log(n)) | Any percentile calculation |
+| Clear | O(n) | Remove all data |
+
+## When to Use Statistics
+
+<Tabs>
+  <Tab title="Good For">
+    - API latency tracking
+    - Performance monitoring
+    - User engagement metrics
+    - Error rate analysis
+    - Score distributions
+    - Ephemeral metrics
+    - High-frequency events
+  </Tab>
+
+  <Tab title="Not Ideal For">
+    - Data you need to query individually
+    - Complex filtering requirements
+    - Data needing relationships
+    - Audit trails
+    - Historical records
+    - Data requiring full-text search
+  </Tab>
+</Tabs>
+
+<Note>
+  If you need to store and query individual data points, use a regular Convex table with `TableAggregate`. Use `DirectAggregate` when you only need the aggregated statistics.
+</Note>
+
+## Try It Out
+
+See the full working example at:
+https://aggregate-component-example.netlify.app/

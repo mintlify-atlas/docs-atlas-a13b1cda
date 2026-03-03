@@ -1,0 +1,166 @@
+---
+title: 'count() and countBatch()'
+description: 'Count items within a range of keys'
+---
+
+## count()
+
+Counts items between the given bounds.
+
+### Signature
+
+```typescript
+async count(
+  ctx: RunQueryCtx,
+  ...opts: NamespacedOpts<{ bounds?: Bounds<K, ID> }, Namespace>
+): Promise<number>
+```
+
+### Parameters
+
+<ParamField path="ctx" type="RunQueryCtx" required>
+  Query context with `runQuery` method (e.g., from a Convex query or action)
+</ParamField>
+
+<ParamField path="opts" type="object">
+  Optional configuration object
+  
+  <Expandable title="properties">
+    <ParamField path="bounds" type="Bounds<K, ID>">
+      Key range to count items within. If not provided, counts all items.
+      
+      <Expandable title="bounds properties">
+        <ParamField path="lower" type="Bound<K, ID>">
+          Lower bound with `key`, optional `id`, and `inclusive` flag
+        </ParamField>
+        
+        <ParamField path="upper" type="Bound<K, ID>">
+          Upper bound with `key`, optional `id`, and `inclusive` flag
+        </ParamField>
+        
+        <ParamField path="prefix" type="K">
+          Prefix to match (alternative to specifying lower/upper bounds)
+        </ParamField>
+      </Expandable>
+    </ParamField>
+    
+    <ParamField path="namespace" type="Namespace">
+      Namespace to query within (if using namespaced aggregates)
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Returns
+
+<ResponseField name="count" type="number">
+  The number of items within the specified bounds
+</ResponseField>
+
+### Example
+
+```typescript
+import { aggregateByScore } from "./leaderboard";
+
+// Count all scores
+export const countScores = query({
+  handler: async (ctx) => {
+    return await aggregateByScore.count(ctx);
+  },
+});
+
+// Count scores within a range
+export const countHighScores = query({
+  handler: async (ctx) => {
+    return await aggregateByScore.count(ctx, {
+      bounds: {
+        lower: { key: -1000, inclusive: true },
+      },
+    });
+  },
+});
+```
+
+---
+
+## countBatch()
+
+Batch version of `count()` - counts items for multiple bounds in a single call.
+
+### Signature
+
+```typescript
+async countBatch(
+  ctx: RunQueryCtx,
+  queries: NamespacedOptsBatch<{ bounds?: Bounds<K, ID> }, Namespace>
+): Promise<number[]>
+```
+
+### Parameters
+
+<ParamField path="ctx" type="RunQueryCtx" required>
+  Query context with `runQuery` method
+</ParamField>
+
+<ParamField path="queries" type="Array<object>" required>
+  Array of query objects, each with optional bounds and namespace
+  
+  <Expandable title="query object properties">
+    <ParamField path="bounds" type="Bounds<K, ID>">
+      Key range to count items within
+    </ParamField>
+    
+    <ParamField path="namespace" type="Namespace">
+      Namespace to query within
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Returns
+
+<ResponseField name="counts" type="number[]">
+  Array of counts, one for each query in the input array
+</ResponseField>
+
+### Example
+
+<Tabs>
+  <Tab title="Basic Usage">
+    ```typescript
+    export const countMultipleRanges = query({
+      handler: async (ctx) => {
+        const counts = await aggregateByScore.countBatch(ctx, [
+          { bounds: { lower: { key: -1000, inclusive: true } } },
+          { bounds: { lower: { key: -500, inclusive: true } } },
+          { bounds: { lower: { key: -100, inclusive: true } } },
+        ]);
+        
+        return {
+          highScores: counts[0],
+          mediumScores: counts[1],
+          lowScores: counts[2],
+        };
+      },
+    });
+    ```
+  </Tab>
+  
+  <Tab title="With Namespaces">
+    ```typescript
+    export const countByUser = query({
+      args: { users: v.array(v.string()) },
+      handler: async (ctx, { users }) => {
+        const queries = users.map(name => ({
+          bounds: { prefix: [name] },
+        }));
+        
+        const counts = await aggregateScoreByUser.countBatch(ctx, queries);
+        
+        return users.map((name, i) => ({
+          name,
+          scoreCount: counts[i],
+        }));
+      },
+    });
+    ```
+  </Tab>
+</Tabs>

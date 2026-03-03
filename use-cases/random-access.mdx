@@ -1,0 +1,440 @@
+---
+title: "Random Access"
+description: "Select random items and shuffle collections efficiently"
+---
+
+Random access lets you pick items at random positions or shuffle entire collections. The Aggregate component makes this efficient without scanning your entire table.
+
+## Overview
+
+This example demonstrates a music library that supports:
+
+- Selecting a random song in O(log(n)) time
+- Shuffling songs with seeded randomization
+- Paginated shuffle results
+- Consistent shuffles with the same seed
+- Efficient counting without sorting overhead
+
+## Schema Definition
+
+Define a simple music table:
+
+```ts convex/schema.ts
+import { defineSchema, defineTable } from "convex/server";
+import { v } from "convex/values";
+
+export default defineSchema({
+  music: defineTable({
+    title: v.string(),
+  }),
+});
+```
+
+## Setting Up the Aggregate
+
+Create an aggregate with **no sorting** by using `null` as the sort key:
+
+```ts convex/shuffle.ts
+import { TableAggregate } from "@convex-dev/aggregate";
+import { components } from "./_generated/api";
+import { DataModel } from "./_generated/dataModel";
+
+const randomize = new TableAggregate<{
+  DataModel: DataModel;
+  TableName: "music";
+  Key: null;
+}>(components.music, {
+  sortKey: () => null,
+});
+```
+
+<Note>
+  By setting `sortKey: () => null`, documents are ordered by their `_id`, which is effectively random. This is perfect for random access!
+</Note>
+
+## Configure the Component
+
+In `convex.config.ts`, install the aggregate:
+
+```ts convex/convex.config.ts
+import { defineApp } from "convex/server";
+import aggregate from "@convex-dev/aggregate/convex.config.js";
+
+const app = defineApp();
+app.use(aggregate, { name: "music" });
+export default app;
+```
+
+## Core Operations
+
+<Steps>
+  <Step title="Add Music">
+    Add songs to your library:
+
+    ```ts
+    import { mutation } from "./_generated/server";
+    import { v } from "convex/values";
+
+    export const addMusic = mutation({
+      args: { title: v.string() },
+      handler: async (ctx, { title }) => {
+        const id = await ctx.db.insert("music", { title });
+        const doc = await ctx.db.get(id);
+        if (!doc) throw new Error("Failed to insert music");
+        
+        await randomize.insert(ctx, doc);
+        return id;
+      },
+    });
+    ```
+  </Step>
+
+  <Step title="Remove Music">
+    Remove songs from your library:
+
+    ```ts
+    export const removeMusic = mutation({
+      args: { id: v.id("music") },
+      handler: async (ctx, { id }) => {
+        const doc = await ctx.db.get(id);
+        if (!doc) return;
+        
+        await ctx.db.delete(id);
+        await randomize.delete(ctx, doc);
+      },
+    });
+    ```
+  </Step>
+
+  <Step title="Get Random Song">
+    Pick a random song in O(log(n)) time:
+
+    ```ts
+    import { query } from "./_generated/server";
+
+    export const getRandomMusicTitle = query({
+      handler: async (ctx) => {
+        const randomMusic = await randomize.random(ctx);
+        if (!randomMusic) return null;
+        
+        const doc = await ctx.db.get(randomMusic.id);
+        if (!doc) return null;
+        return doc.title;
+      },
+    });
+    ```
+  </Step>
+
+  <Step title="Get Total Count">
+    Count all songs efficiently:
+
+    ```ts
+    export const getTotalMusicCount = query({
+      handler: async (ctx) => {
+        return await randomize.count(ctx);
+      },
+    });
+    ```
+  </Step>
+</Steps>
+
+## Shuffling with Seeds
+
+Create consistent, reproducible shuffles using seeded random number generation:
+
+```ts
+import Rand from "rand-seed";
+
+export const shufflePaginated = query({
+  args: {
+    offset: v.number(),
+    numItems: v.number(),
+    seed: v.string(),
+  },
+  handler: async (ctx, { offset, numItems, seed }) => {
+    const count = await randomize.count(ctx);
+    
+    // Create seeded random number generator
+    // Same seed = same shuffle every time!
+    const rand = new Rand(seed);
+
+    // Generate all indexes
+    const allIndexes = Array.from({ length: count }, (_, i) => i);
+    
+    // Shuffle them
+    shuffle(allIndexes, rand);
+
+    // Get the page of shuffled indexes
+    const indexes = allIndexes.slice(offset, offset + numItems);
+
+    // Fetch songs at those positions
+    const atIndexes = await Promise.all(
+      indexes.map((i) => randomize.at(ctx, i)),
+    );
+
+    const items = await Promise.all(
+      atIndexes.map(async (atIndex) => {
+        const doc = await ctx.db.get(atIndex.id);
+        if (!doc) throw new Error("Failed to get music");
+        return doc.title;
+      }),
+    );
+
+    const totalPages = Math.ceil(count / numItems);
+    const currentPage = Math.floor(offset / numItems) + 1;
+
+    return {
+      items,
+      totalCount: count,
+      totalPages,
+      currentPage,
+      hasNextPage: offset + numItems < count,
+      hasPrevPage: offset > 0,
+    };
+  },
+});
+
+// Fisher-Yates shuffle algorithm
+function shuffle<T>(array: T[], rand: Rand): T[] {
+  for (let i = array.length - 1; i > 0; i--) {
+    const j = Math.floor(rand.next() * (i + 1));
+    [array[i], array[j]] = [array[j]!, array[i]!];
+  }
+  return array;
+}
+```
+
+<Tip>
+  Using a seeded random number generator means the same seed always produces the same shuffle. Perfect for "play this shuffled playlist" functionality!
+</Tip>
+
+## How It Works
+
+### Random Selection
+
+1. **Get total count**: `count = await randomize.count(ctx)`
+2. **Pick random index**: `index = Math.floor(Math.random() * count)`
+3. **Get item at index**: `item = await randomize.at(ctx, index)`
+
+All in O(log(n)) time!
+
+### Seeded Shuffling
+
+1. Generate array of all indexes: `[0, 1, 2, ..., n-1]`
+2. Shuffle with seeded RNG (Fisher-Yates algorithm)
+3. Same seed → same shuffle order
+4. Fetch items at shuffled positions using `randomize.at()`
+
+## Example Use Cases
+
+<Tabs>
+  <Tab title="Music Player">
+    ```tsx
+    function MusicPlayer() {
+      const randomSong = useQuery(api.shuffle.getRandomMusicTitle);
+      const [history, setHistory] = useState<string[]>([]);
+
+      const playRandom = useMutation(api.shuffle.getRandomMusicTitle);
+
+      const handleNext = async () => {
+        const song = await playRandom();
+        if (song) {
+          setHistory([...history, song]);
+          // Play the song...
+        }
+      };
+
+      return (
+        <div>
+          <h2>Now Playing: {randomSong}</h2>
+          <button onClick={handleNext}>Next Random Song</button>
+        </div>
+      );
+    }
+    ```
+  </Tab>
+
+  <Tab title="Shuffled Playlist">
+    ```tsx
+    function ShuffledPlaylist() {
+      const [seed] = useState(() => Math.random().toString());
+      const [page, setPage] = useState(0);
+      const pageSize = 20;
+
+      const shuffled = useQuery(api.shuffle.shufflePaginated, {
+        offset: page * pageSize,
+        numItems: pageSize,
+        seed,
+      });
+
+      return (
+        <div>
+          <h2>Shuffled Playlist</h2>
+          <p>Page {shuffled?.currentPage} of {shuffled?.totalPages}</p>
+          
+          <ul>
+            {shuffled?.items.map((title, i) => (
+              <li key={i}>{title}</li>
+            ))}
+          </ul>
+
+          <button 
+            onClick={() => setPage(page - 1)}
+            disabled={!shuffled?.hasPrevPage}
+          >
+            Previous
+          </button>
+          <button 
+            onClick={() => setPage(page + 1)}
+            disabled={!shuffled?.hasNextPage}
+          >
+            Next
+          </button>
+        </div>
+      );
+    }
+    ```
+  </Tab>
+
+  <Tab title="Random Quiz Question">
+    ```tsx
+    function QuizApp() {
+      const totalQuestions = useQuery(api.questions.count);
+      const [answeredIndexes, setAnsweredIndexes] = useState<Set<number>>(
+        new Set()
+      );
+
+      const getNextQuestion = async () => {
+        if (!totalQuestions) return;
+        
+        // Find an unanswered question
+        let index;
+        do {
+          index = Math.floor(Math.random() * totalQuestions);
+        } while (answeredIndexes.has(index));
+
+        const question = await getQuestionAtIndex({ index });
+        return question;
+      };
+
+      return (
+        <div>
+          <p>Progress: {answeredIndexes.size} / {totalQuestions}</p>
+          <button onClick={getNextQuestion}>Next Question</button>
+        </div>
+      );
+    }
+    ```
+  </Tab>
+
+  <Tab title="Random Sample">
+    ```ts
+    // Get N random songs without duplicates
+    export const getRandomSample = query({
+      args: { count: v.number() },
+      handler: async (ctx, { count }) => {
+        const total = await randomize.count(ctx);
+        const sampleSize = Math.min(count, total);
+        
+        // Generate random unique indexes
+        const indexes = new Set<number>();
+        while (indexes.size < sampleSize) {
+          indexes.add(Math.floor(Math.random() * total));
+        }
+
+        // Fetch songs at those indexes
+        const songs = await Promise.all(
+          Array.from(indexes).map(async (i) => {
+            const item = await randomize.at(ctx, i);
+            const doc = await ctx.db.get(item.id);
+            return doc?.title;
+          }),
+        );
+
+        return songs.filter(Boolean);
+      },
+    });
+    ```
+  </Tab>
+</Tabs>
+
+## Performance Characteristics
+
+| Operation | Time Complexity | Description |
+|-----------|----------------|-------------|
+| Random selection | O(log(n)) | Pick any random item |
+| Count items | O(log(n)) | Get total count |
+| Access by index | O(log(n)) | Get item at position |
+| Shuffle (full) | O(n) | Generate all shuffled indexes |
+| Shuffle (paginated) | O(n) + O(log(n) × page size) | In-memory shuffle + DB lookups |
+
+<Note>
+  The shuffle operation is O(n) because we generate all indexes in memory, but this is fast since it's just integer manipulation. The database lookups are O(log(n)) per item.
+</Note>
+
+## Shuffle Performance Note
+
+The `shufflePaginated` function recalculates the shuffle on every page:
+
+```ts
+// This runs O(n) for every page view
+const allIndexes = Array.from({ length: count }, (_, i) => i);
+shuffle(allIndexes, rand);
+```
+
+This is actually fine because:
+- It's just in-memory integer manipulation (very fast)
+- No database queries involved in the shuffle itself
+- The heavy part is fetching data, which is O(page size)
+- Overall: O(n) shuffle + O(log(n) × page size) for DB access
+
+<Tip>
+  If you need to shuffle very large collections (millions of items) and performance becomes an issue, consider storing the shuffled order in a separate table.
+</Tip>
+
+## Handling Edge Cases
+
+```ts
+// Handle empty collection
+export const getRandomMusicTitle = query({
+  handler: async (ctx) => {
+    const count = await randomize.count(ctx);
+    if (count === 0) return null;
+
+    const randomMusic = await randomize.random(ctx);
+    if (!randomMusic) return null;
+    
+    const doc = await ctx.db.get(randomMusic.id);
+    return doc?.title ?? null;
+  },
+});
+
+// Ensure valid range
+export const getSongAtIndex = query({
+  args: { index: v.number() },
+  handler: async (ctx, { index }) => {
+    const count = await randomize.count(ctx);
+    
+    // Clamp index to valid range
+    const safeIndex = Math.max(0, Math.min(index, count - 1));
+    
+    const item = await randomize.at(ctx, safeIndex);
+    const doc = await ctx.db.get(item.id);
+    return doc?.title ?? null;
+  },
+});
+```
+
+## When to Use Random Access
+
+- **Music/Video players**: Next random song/video
+- **Quiz applications**: Random questions without duplicates
+- **Sample selection**: Pick N random items from a collection
+- **Shuffled playlists**: Consistent shuffle with seeds
+- **Random recommendations**: Show different items each visit
+- **Testing**: Random data selection for tests
+
+## Try It Out
+
+See the full working example at:
+https://aggregate-component-example.netlify.app/

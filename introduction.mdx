@@ -1,0 +1,120 @@
+---
+title: Introduction
+description: Calculate count, sum, and rankings efficiently with O(log n) performance for your Convex application
+---
+
+# Convex Aggregate Component
+
+The Convex Aggregate component provides efficient aggregation operations on your Convex data with **O(log n)** time complexity, replacing the O(n) performance of naive `.collect()` or `COUNT(*)` queries.
+
+Perfect for leaderboards, analytics dashboards, pagination, and any scenario where you need big-picture data without fetching every document.
+
+<Note>
+This component maintains a denormalized data structure that automatically keeps counts and sums up-to-date as your data changes.
+</Note>
+
+## Key Features
+
+**Lightning Fast Queries**
+Get counts, sums, rankings, and percentiles in logarithmic time, no matter how large your dataset grows.
+
+**Flexible Sorting & Grouping**
+Sort by numbers, strings, or compound keys. Group data by prefix to aggregate at any level of detail.
+
+**Namespace Isolation**
+Separate data into isolated namespaces for maximum throughput when partitions don't need cross-aggregation.
+
+**Fully Reactive**
+All aggregates update in real-time with Convex's reactivity. No polling, no stale data, no refresh needed.
+
+**Transactional Updates**
+Atomically update your tables and aggregates together. No race conditions or inconsistent states.
+
+**Batch Operations**
+Perform multiple aggregation queries efficiently in a single call with `countBatch()`, `sumBatch()`, and `atBatch()`.
+
+## Common Use Cases
+
+<CardGroup cols={2}>
+  <Card title="Leaderboards" icon="trophy" href="/quickstart">
+    Track game scores with rankings, percentiles, and user-specific statistics
+  </Card>
+  
+  <Card title="Analytics Dashboards" icon="chart-line" href="/quickstart">
+    Calculate total counts, sums, and averages across time ranges or categories
+  </Card>
+  
+  <Card title="Offset Pagination" icon="list" href="/quickstart">
+    Display numbered pages of results without loading all documents
+  </Card>
+  
+  <Card title="Random Access" icon="shuffle" href="/quickstart">
+    Pick random items efficiently for playlists, recommendations, or sampling
+  </Card>
+</CardGroup>
+
+## Quick Example
+
+Here's what you can do with the Aggregate component:
+
+```ts
+// Count total scores
+await aggregate.count(ctx);
+
+// Count scores greater than 65
+await aggregate.count(ctx, { 
+  bounds: { lower: { key: 65, inclusive: false } } 
+});
+
+// Find the p95 score
+await aggregate.at(ctx, Math.floor(aggregate.count(ctx) * 0.95));
+
+// Find overall average score
+await aggregate.sum(ctx) / await aggregate.count(ctx);
+
+// Find ranking for a score of 65
+await aggregate.indexOf(ctx, 65);
+
+// User-specific high score (with grouping)
+const bounds = { prefix: [username] };
+await aggregateScoreByUser.max(ctx, { bounds });
+
+// User-specific average score
+const sum = await aggregateScoreByUser.sum(ctx, { bounds });
+const count = await aggregateScoreByUser.count(ctx, { bounds });
+const avgScore = sum / count;
+```
+
+## How It Works
+
+The Aggregate component maintains an internal tree-based data structure that stores denormalized counts and sums. This allows queries to read just a few documents instead of scanning your entire table.
+
+<Warning>
+You must update the aggregate whenever you modify the source table. The component provides helpers like triggers and idempotent operations to make this reliable.
+</Warning>
+
+## Get Started
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install the component and configure your Convex app
+  </Card>
+  
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build a working leaderboard in minutes
+  </Card>
+</CardGroup>
+
+## Performance Comparison
+
+| Operation | Without Aggregate | With Aggregate |
+|-----------|------------------|----------------|
+| Count all items | O(n) | O(log n) |
+| Find ranking | O(n) | O(log n) |
+| Get item at offset | O(n) | O(log n) |
+| Calculate sum | O(n) | O(log n) |
+| Find percentile | O(n log n) | O(log n) |
+
+<Note>
+The component is fully transactional and reactive, ensuring your aggregates stay in sync with your data automatically.
+</Note>

@@ -1,0 +1,150 @@
+---
+title: "delete()"
+description: "Remove an item from the aggregate data structure"
+---
+
+Removes a key-value pair from the aggregate data structure. The `delete()` method is available on both `DirectAggregate` and `TableAggregate` classes.
+
+<Warning>
+The item must exist in the data structure, or this method will throw an error. For idempotent deletes, use [`deleteIfExists()`](/api/idempotent-operations).
+</Warning>
+
+## DirectAggregate.delete()
+
+Delete an item by providing its key and ID.
+
+### Signature
+
+```typescript
+async delete(
+  ctx: RunMutationCtx,
+  args: NamespacedArgs<
+    { key: K; id: ID },
+    Namespace
+  >
+): Promise<void>
+```
+
+### Parameters
+
+<ParamField path="ctx" type="RunMutationCtx" required>
+  The mutation context from a Convex mutation or action.
+</ParamField>
+
+<ParamField path="args" type="object" required>
+  <Expandable title="properties">
+    <ParamField path="key" type="K" required>
+      The sort key of the item to delete.
+    </ParamField>
+    
+    <ParamField path="id" type="ID" required>
+      The unique identifier of the item to delete.
+    </ParamField>
+    
+    <ParamField path="namespace" type="Namespace">
+      Optional namespace for isolating aggregates. Required if the aggregate was initialized with a namespace type.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+### Example
+
+```typescript
+import { DirectAggregate } from "@convex-dev/aggregate";
+import { mutation } from "./_generated/server";
+import { components } from "./_generated/api";
+
+const leaderboard = new DirectAggregate<{
+  Key: number;
+  Id: string;
+}>(components.aggregate);
+
+export const removeScore = mutation({
+  args: { playerId: v.string(), score: v.number() },
+  handler: async (ctx, args) => {
+    await leaderboard.delete(ctx, {
+      key: -args.score,
+      id: args.playerId,
+    });
+  },
+});
+```
+
+## TableAggregate.delete()
+
+Delete an item computed from a table document. This is typically called automatically via [triggers](/api/triggers).
+
+### Signature
+
+```typescript
+async delete(
+  ctx: RunMutationCtx,
+  doc: DocumentByName<DataModel, TableName>
+): Promise<void>
+```
+
+### Parameters
+
+<ParamField path="ctx" type="RunMutationCtx" required>
+  The mutation context from a Convex mutation or action.
+</ParamField>
+
+<ParamField path="doc" type="DocumentByName" required>
+  The table document to delete. The key is computed from this document using the `sortKey` function provided during TableAggregate initialization.
+</ParamField>
+
+### Example
+
+```typescript
+import { TableAggregate } from "@convex-dev/aggregate";
+import { mutation } from "./_generated/server";
+import { components } from "./_generated/api";
+import { Triggers } from "convex-helpers/server/triggers";
+
+const leaderboard = new TableAggregate<{
+  Key: number;
+  DataModel: DataModel;
+  TableName: "leaderboard";
+}>(components.aggregate, {
+  sortKey: (doc) => -doc.score,
+});
+
+const triggers = new Triggers<DataModel>();
+triggers.register("leaderboard", leaderboard.trigger());
+
+// The delete is called automatically via the trigger
+export const removeScore = mutation({
+  args: { id: v.id("leaderboard") },
+  handler: async (ctx, args) => {
+    await ctx.db.delete(args.id);
+    // Aggregate is updated automatically by the trigger
+  },
+});
+```
+
+## Behavior
+
+- The operation is atomic and changes are visible immediately to subsequent queries
+- Throws an error if the `[key, id]` pair does not exist in the data structure
+- The sumValue of the deleted item is subtracted from aggregate sums
+- The count is decremented by 1
+
+## Related Methods
+
+<CardGroup cols={2}>
+  <Card title="deleteIfExists()" icon="shield-check" href="/api/idempotent-operations">
+    Idempotent version that doesn't throw if the item doesn't exist
+  </Card>
+  
+  <Card title="insert()" icon="plus" href="/api/insert">
+    Add a new item to the aggregate
+  </Card>
+  
+  <Card title="replace()" icon="arrow-right-arrow-left" href="/api/replace">
+    Update an existing item atomically
+  </Card>
+  
+  <Card title="Triggers" icon="bolt" href="/api/triggers">
+    Automatically sync TableAggregates with database changes
+  </Card>
+</CardGroup>

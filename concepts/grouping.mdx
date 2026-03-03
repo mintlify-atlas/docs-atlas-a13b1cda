@@ -1,0 +1,203 @@
+---
+title: "Grouping"
+description: "Use prefix bounds to group and aggregate data at multiple levels"
+---
+
+## Overview
+
+Grouping allows you to partition your aggregated data and query subsets efficiently. By using array keys with prefix bounds, you can view your data from any altitude - from global totals down to individual groups.
+
+## How Grouping Works
+
+Use sorting to group your data set. If you want to track multiple games with scores for each user, use a tuple as the key:
+
+```ts
+const aggregateByGame = new TableAggregate<{
+  Key: [string, string, number];  // [game, username, score]
+  DataModel: DataModel;
+  TableName: "scores";
+}>(components.aggregateByGame, {
+  sortKey: (doc) => [doc.game, doc.username, doc.score],
+  sumValue: (doc) => doc.score,
+});
+```
+
+## Prefix Bounds
+
+Prefix bounds let you filter by the first N elements of an array key:
+
+### Game-Level Aggregates
+
+Count how many times a game has been played:
+
+```ts
+const gamesPlayed = await aggregateByGame.count(ctx, {
+  bounds: { prefix: ["chess"] },
+});
+```
+
+### User-Game Aggregates
+
+Count how many times a user has played a specific game:
+
+```ts
+const userGamesPlayed = await aggregateByGame.count(ctx, {
+  bounds: { prefix: ["chess", "alice"] },
+});
+```
+
+### User High Score
+
+Get the high score for a user in a game:
+
+```ts
+const highScore = await aggregateByGame.max(ctx, {
+  bounds: { prefix: ["chess", "alice"] },
+});
+```
+
+<Info>
+Since the key is `[game, username, score]`, the max within a prefix of `["chess", "alice"]` gives the highest score for that user in that game.
+</Info>
+
+## Multi-Level Analysis
+
+With prefix bounds, you can analyze data at different levels:
+
+```ts
+// Global: All games, all users
+const totalScores = await aggregateByGame.count(ctx);
+const globalAverage = await aggregateByGame.sum(ctx) / totalScores;
+
+// Per-game: All users in a specific game
+const chessScores = await aggregateByGame.count(ctx, {
+  bounds: { prefix: ["chess"] },
+});
+const chessAverage = 
+  await aggregateByGame.sum(ctx, { bounds: { prefix: ["chess"] } }) / chessScores;
+
+// Per-user-per-game: Specific user in specific game
+const aliceChessScores = await aggregateByGame.count(ctx, {
+  bounds: { prefix: ["chess", "alice"] },
+});
+const aliceChessAverage = 
+  await aggregateByGame.sum(ctx, { bounds: { prefix: ["chess", "alice"] } }) / aliceChessScores;
+```
+
+## Example: User Scores
+
+Here's a complete example from the leaderboard:
+
+```ts
+const aggregateScoreByUser = new TableAggregate<{
+  Key: [string, number];  // [username, score]
+  DataModel: DataModel;
+  TableName: "leaderboard";
+}>(components.aggregateScoreByUser, {
+  sortKey: (doc) => [doc.name, doc.score],
+  sumValue: (doc) => doc.score,
+});
+
+// Get a user's average score
+export const userAverageScore = query({
+  args: { name: v.string() },
+  handler: async (ctx, { name }) => {
+    const bounds = { prefix: [name] };
+    const count = await aggregateScoreByUser.count(ctx, { bounds });
+    if (!count) return null;
+    
+    const sum = await aggregateScoreByUser.sum(ctx, { bounds });
+    return sum / count;
+  },
+});
+
+// Get a user's high score
+export const userHighScore = query({
+  args: { name: v.string() },
+  handler: async (ctx, { name }) => {
+    const item = await aggregateScoreByUser.max(ctx, {
+      bounds: { prefix: [name] },
+    });
+    return item?.sumValue ?? null;
+  },
+});
+```
+
+## Sort Order Matters
+
+The order of elements in your key determines what prefix queries return:
+
+<Warning>
+```ts
+// With key: [game, username, score]
+await aggregateByGame.max(ctx, { bounds: { prefix: ["chess"] } })
+// Returns: The user with the highest username who played chess (like "Zach")
+// NOT the highest score!
+
+// To get the highest score for a game, use: [game, score, username]
+sortKey: (doc) => [doc.game, doc.score, doc.username]
+await aggregateByGame.max(ctx, { bounds: { prefix: ["chess"] } })
+// Returns: The highest score in chess
+```
+</Warning>
+
+Always design your key structure based on what aggregates you need to compute.
+
+## Combining with Regular Bounds
+
+You can combine prefix bounds with regular lower/upper bounds for more precise queries:
+
+```ts
+// Count Alice's chess scores between 1000 and 2000
+const midRangeScores = await aggregateByGame.count(ctx, {
+  bounds: {
+    prefix: ["chess", "alice"],
+    lower: { key: ["chess", "alice", 1000], inclusive: true },
+    upper: { key: ["chess", "alice", 2000], inclusive: true },
+  },
+});
+```
+
+## Tradeoffs: Grouping vs Namespacing
+
+Grouping with prefix bounds is powerful but has a tradeoff:
+
+**Pros:**
+- Query at any level (global, per-game, per-user-per-game)
+- Single aggregate instance handles all data
+- Flexible analysis across groups
+
+**Cons:**
+- Nearby data points (e.g., "Alice" and "Amy") share internal B-tree nodes
+- Writes to nearby groups can cause contention
+- Reduced throughput for high-write workloads
+
+<Tip>
+If you don't need to aggregate across groups, consider using [namespaces](/concepts/namespacing) instead. Namespaces completely isolate groups from each other, maximizing throughput.
+</Tip>
+
+## Multiple Aggregates for Different Views
+
+You can define multiple aggregate instances for different grouping strategies:
+
+```ts
+// View 1: Group by user, then score
+app.use(aggregate, { name: "aggregateScoreByUser" });
+const byUser = new TableAggregate<{
+  Key: [string, number];
+  // ...
+}>(components.aggregateScoreByUser, {
+  sortKey: (doc) => [doc.username, doc.score],
+});
+
+// View 2: Group by score (for leaderboard)
+app.use(aggregate, { name: "aggregateByScore" });
+const byScore = new TableAggregate<{
+  Key: number;
+  // ...
+}>(components.aggregateByScore, {
+  sortKey: (doc) => -doc.score,  // Descending
+});
+```
+
+Each aggregate maintains its own B-tree, optimized for different query patterns.

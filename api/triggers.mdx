@@ -1,0 +1,215 @@
+---
+title: 'trigger, idempotentTrigger'
+description: 'Automatically sync table changes to aggregate data structures'
+---
+
+## trigger()
+
+Create a trigger function that automatically updates the aggregate when table rows change.
+
+```typescript
+trigger<Ctx extends RunMutationCtx>(): Trigger<Ctx, DataModel, TableName>
+```
+
+### Return type
+
+```typescript
+type Trigger<Ctx, DataModel, TableName> = (
+  ctx: Ctx,
+  change: Change<DataModel, TableName>
+) => Promise<void>
+
+type Change<DataModel, TableName> = {
+  id: GenericId<TableName>;
+} & (
+  | {
+      operation: "insert";
+      oldDoc: null;
+      newDoc: DocumentByName<DataModel, TableName>;
+    }
+  | {
+      operation: "update";
+      oldDoc: DocumentByName<DataModel, TableName>;
+      newDoc: DocumentByName<DataModel, TableName>;
+    }
+  | {
+      operation: "delete";
+      oldDoc: DocumentByName<DataModel, TableName>;
+      newDoc: null;
+    }
+)
+```
+
+### Usage with convex-helpers
+
+Integrate with the `Triggers` class from `convex-helpers` to automatically keep aggregates synchronized with table changes.
+
+```typescript
+import { TableAggregate } from "@convex-dev/aggregate";
+import { Triggers } from "convex-helpers/server/triggers";
+import {
+  customCtx,
+  customMutation,
+} from "convex-helpers/server/customFunctions";
+import { mutation } from "./_generated/server";
+import { components } from "./_generated/api.js";
+import type { DataModel } from "./_generated/dataModel.js";
+
+// Define your aggregate
+const aggregateByScore = new TableAggregate<{
+  Key: number;
+  DataModel: DataModel;
+  TableName: "leaderboard";
+}>(components.aggregateByScore, {
+  sortKey: (doc) => -doc.score,
+});
+
+// Register triggers
+const triggers = new Triggers<DataModel>();
+triggers.register("leaderboard", aggregateByScore.trigger());
+
+// Create custom mutation function
+const mutationWithTriggers = customMutation(
+  mutation,
+  customCtx(triggers.wrapDB)
+);
+
+// Use in mutations
+export const addScore = mutationWithTriggers({
+  args: { name: v.string(), score: v.number() },
+  handler: async (ctx, args) => {
+    // The trigger automatically updates the aggregate
+    const id = await ctx.db.insert("leaderboard", {
+      name: args.name,
+      score: args.score,
+    });
+    return id;
+  },
+});
+
+export const updateScore = mutationWithTriggers({
+  args: {
+    id: v.id("leaderboard"),
+    score: v.number(),
+  },
+  handler: async (ctx, args) => {
+    // The trigger automatically updates the aggregate
+    await ctx.db.patch(args.id, { score: args.score });
+  },
+});
+
+export const removeScore = mutationWithTriggers({
+  args: { id: v.id("leaderboard") },
+  handler: async (ctx, { id }) => {
+    // The trigger automatically updates the aggregate
+    await ctx.db.delete(id);
+  },
+});
+```
+
+### How it works
+
+The trigger function:
+
+1. **Insert operations**: Calls `aggregate.insert()` with the new document
+2. **Update operations**: Calls `aggregate.replace()` with both old and new documents
+3. **Delete operations**: Calls `aggregate.delete()` with the old document
+
+<Note>
+  The trigger uses the `sortKey` and `sumValue` functions defined in the `TableAggregate` constructor to extract the appropriate values from each document.
+</Note>
+
+---
+
+## idempotentTrigger()
+
+Create an idempotent trigger function that can safely handle duplicate operations.
+
+```typescript
+idempotentTrigger<Ctx extends RunMutationCtx>(): Trigger<Ctx, DataModel, TableName>
+```
+
+### When to use
+
+Use `idempotentTrigger()` instead of `trigger()` for live backfills or scenarios where operations might be replayed:
+
+1. **Update live writes** to use the idempotent trigger
+2. **Run a background backfill**, paginating over existing data
+3. **Switch back** to regular `trigger()` once backfill is complete
+4. **Begin using** the aggregate read methods
+
+### Example: Live backfill
+
+```typescript
+import { TableAggregate } from "@convex-dev/aggregate";
+import { Triggers } from "convex-helpers/server/triggers";
+import { components, internal } from "./_generated/api.js";
+import { internalMutation } from "./_generated/server";
+
+const aggregateByScore = new TableAggregate<{
+  Key: number;
+  DataModel: DataModel;
+  TableName: "leaderboard";
+}>(components.aggregateByScore, {
+  sortKey: (doc) => -doc.score,
+});
+
+// Step 1: Use idempotent trigger for live writes
+const triggers = new Triggers<DataModel>();
+triggers.register(
+  "leaderboard",
+  aggregateByScore.idempotentTrigger()  // Idempotent version
+);
+
+const mutationWithTriggers = customMutation(
+  mutation,
+  customCtx(triggers.wrapDB)
+);
+
+// Step 2: Backfill existing data
+export const backfillAggregate = internalMutation(async (ctx) => {
+  const docs = await ctx.db.query("leaderboard").collect();
+  
+  for (const doc of docs) {
+    // insertIfDoesNotExist is safe to call multiple times
+    await aggregateByScore.insertIfDoesNotExist(ctx, doc);
+  }
+});
+```
+
+### How it works
+
+The idempotent trigger function uses:
+
+- `insertIfDoesNotExist()` instead of `insert()`
+- `replaceOrInsert()` instead of `replace()`
+- `deleteIfExists()` instead of `delete()`
+
+These methods will not throw errors if:
+- An item already exists (for insert operations)
+- An item doesn't exist (for delete operations)
+- The operation is replayed multiple times
+
+<Warning>
+  Idempotent triggers have slightly more overhead than regular triggers. Switch back to `trigger()` after your backfill is complete.
+</Warning>
+
+### Backfill workflow
+
+<Steps>
+  <Step title="Deploy idempotent trigger">
+    Update your mutations to use `idempotentTrigger()` instead of `trigger()`
+  </Step>
+  
+  <Step title="Run backfill">
+    Execute your backfill mutation to process existing data
+  </Step>
+  
+  <Step title="Switch to regular trigger">
+    Once backfill is complete, switch back to `trigger()` for better performance
+  </Step>
+  
+  <Step title="Start using aggregates">
+    Begin querying the aggregate for counts, sums, and rankings
+  </Step>
+</Steps>

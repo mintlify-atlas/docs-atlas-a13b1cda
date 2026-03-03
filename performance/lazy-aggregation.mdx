@@ -1,0 +1,196 @@
+---
+title: Lazy Aggregation
+description: Optimize write performance by trading off query speed for reduced write contention
+---
+
+## What is Lazy Aggregation?
+
+The Aggregate component internally denormalizes counts in a B-tree data structure so they can be calculated efficiently by reading only a few documents instead of every document in your table. However, this eager aggregation isn't always required or optimal.
+
+Lazy aggregation allows you to trade off query speed and database bandwidth for reduced impact of writes on each other.
+
+## Default Behavior: Lazy Root
+
+By default, the root aggregation node is **lazy** - it doesn't store a precomputed count.
+
+### Benefits of a Lazy Root
+
+<Tip>
+  A lazy root node reduces write contention by ensuring that inserts at very small keys don't interfere with writes or reads on very large keys.
+</Tip>
+
+**How it works:**
+- When `aggregate.count(ctx)` is called, it must read several documents instead of just one
+- However, writes to different parts of the tree don't all contend on a single root node
+- This reduces OCC conflicts for concurrent writes
+
+**Trade-offs:**
+- Slightly slower queries (must read multiple nodes)
+- Lower bandwidth usage for queries
+- Much better write throughput and reduced conflicts
+
+### When to Use Eager Root Aggregation
+
+If your workload is **read-heavy** with infrequent updates, you can optimize for query speed by disabling the lazy root:
+
+```ts
+// Clear and reinitialize with eager root aggregation
+await aggregate.clear(ctx, { rootLazy: false });
+```
+
+<Warning>
+  With `rootLazy: false`, all writes update a single root node, causing every write operation to contend with every other write. Only use this for read-heavy workloads.
+</Warning>
+
+**Use cases for eager root:**
+- Data that changes infrequently (e.g., daily or weekly updates)
+- Workloads with many more reads than writes
+- Scenarios where maximum query speed is critical
+
+## Converting to Lazy Root
+
+If you have an existing aggregate with frequent writes causing contention, you can convert it to use a lazy root:
+
+```ts
+await aggregate.makeRootLazy(ctx, namespace);
+```
+
+This removes the frequent writes to the root node. After conversion:
+- Updates will only contend with other updates to the same shard of the tree
+- Write throughput improves significantly
+- Query latency increases slightly
+
+### Converting All Namespaces
+
+If you're using namespaced aggregates:
+
+```ts
+await aggregate.makeAllRootsLazy(ctx);
+```
+
+This iterates through all namespaces and makes each root lazy.
+
+<Note>
+  `makeRootLazy` is a one-way operation. To go back to eager aggregation, you must use `clear()` with `rootLazy: false`, which removes all data.
+</Note>
+
+## Tuning maxNodeSize
+
+The `maxNodeSize` parameter controls the width and depth of the aggregate B-tree structure. This is another key tuning parameter for lazy aggregation.
+
+### How maxNodeSize Affects Performance
+
+With a lazy root and default `maxNodeSize` of 16:
+- Each write updates a document that accumulates 1/16th of the entire data structure
+- Each write intersects with approximately 1/16th of all other writes
+- Reads may spuriously rerun about 1/16th of the time
+
+### Increasing maxNodeSize
+
+To reduce write contention further, increase `maxNodeSize`:
+
+```ts
+// Clear and reinitialize with larger node size
+await aggregate.clear(ctx, { maxNodeSize: 64 });
+```
+
+**Effects of larger maxNodeSize:**
+- Fewer internal nodes in the tree (wider, shallower tree)
+- Less write contention (each write affects a smaller fraction of other writes)
+- Slightly slower queries (may need to scan more items per node)
+- Less spurious query reruns
+
+<Tip>
+  If you're experiencing high OCC conflict rates, try increasing `maxNodeSize` to 32, 64, or even 128.
+</Tip>
+
+### Choosing the Right maxNodeSize
+
+| maxNodeSize | Tree Depth | Write Contention | Query Speed | Best For |
+|-------------|------------|------------------|-------------|-----------|
+| 16 (default) | Deeper | Moderate | Faster | Balanced workloads |
+| 32-64 | Medium | Lower | Medium | Write-heavy workloads |
+| 128+ | Shallower | Lowest | Slower | Very high write throughput |
+
+<Warning>
+  Changing `maxNodeSize` requires calling `clear()`, which removes all existing data. You'll need to backfill the aggregate after clearing.
+</Warning>
+
+## Combining Lazy Root and maxNodeSize
+
+For maximum write throughput with minimal contention:
+
+```ts
+// Optimize for high write throughput
+await aggregate.clear(ctx, { 
+  maxNodeSize: 64,
+  rootLazy: true  // This is the default
+});
+```
+
+This configuration:
+- Uses a lazy root to avoid all writes contending on a single node
+- Increases node size to reduce the number of internal nodes
+- Minimizes write contention across the tree
+
+## Example: Converting an Existing Aggregate
+
+If you have an aggregate that's experiencing OCC conflicts:
+
+```ts
+import { internalMutation } from "./_generated/server";
+import { components } from "./_generated/api";
+import { TableAggregate } from "@convex-dev/aggregate";
+
+const aggregate = new TableAggregate<{
+  Key: number;
+  DataModel: DataModel;
+  TableName: "events";
+}>(components.aggregate, {
+  sortKey: (doc) => doc.timestamp,
+});
+
+// Step 1: Make the root lazy without clearing data
+export const optimizeAggregate = internalMutation({
+  handler: async (ctx) => {
+    await aggregate.makeRootLazy(ctx, undefined);
+  },
+});
+
+// Step 2: If you need more optimization, clear and increase maxNodeSize
+export const deepOptimizeAggregate = internalMutation({
+  handler: async (ctx) => {
+    // This will remove all data - you'll need to backfill
+    await aggregate.clear(ctx, { 
+      maxNodeSize: 64,
+      rootLazy: true 
+    });
+    // Now run your backfill process
+  },
+});
+```
+
+## Performance Monitoring
+
+Watch for these signs that you need lazy aggregation:
+
+1. **High OCC conflict rate**: Mutations frequently failing with OCC errors
+2. **Slow mutation throughput**: Writes taking longer than expected
+3. **Query reruns**: Queries rerunning frequently without result changes
+
+<Tip>
+  Use the Convex dashboard to monitor function call rates and error rates. A spike in OCC errors indicates write contention issues.
+</Tip>
+
+## Summary
+
+| Setting | Write Throughput | Query Speed | Use When |
+|---------|------------------|-------------|----------|
+| `rootLazy: true` (default) | High | Medium | Most workloads |
+| `rootLazy: false` | Low | Fast | Read-heavy, infrequent writes |
+| `rootLazy: true` + large `maxNodeSize` | Highest | Slower | Very high write throughput needed |
+
+## See Also
+
+- [Read Dependencies and OCC Conflicts](/performance/read-dependencies) - Understanding how reads affect writes
+- [Optimizing Throughput](/performance/optimizing-throughput) - Additional strategies for performance
